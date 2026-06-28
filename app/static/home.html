@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OmniDL — Your music, from anywhere</title>
+  <meta name="description" content="OmniDL is a local, self-hosted music downloader that unifies Spotify, YouTube, and SoundCloud behind one clean dashboard — no Premium, no API keys." />
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/css/site.css" />
+  <script>document.documentElement.classList.add('js');try{if(localStorage.getItem('omnidl-theme')==='light')document.documentElement.classList.add('light');}catch(e){}</script>
+</head>
+<body>
+  <div class="aurora"><span class="a1"></span><span class="a2"></span><span class="a3"></span></div>
+  <canvas id="bg-canvas" class="bg-canvas"></canvas>
+
+  <header class="site-header">
+    <div class="wrap">
+      <a class="brand" href="/"><span class="logo">◐</span> Omni<span class="accent">DL</span></a>
+      <nav class="nav">
+        <a class="nav-link" href="#features">Features</a>
+        <a class="nav-link" href="#how">How it works</a>
+        <a class="nav-link" href="#faq">FAQ</a>
+        <a class="nav-link" href="/about">About</a>
+        <button id="theme-toggle" class="icon-btn" title="Toggle theme">☀</button>
+        <a class="btn primary" href="/dashboard">Launch app ▸</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <span class="eyebrow"><span class="dot"></span> Local &amp; self-hosted · no Premium · no API keys</span>
+      <h1>Your music library, <span class="grad">from anywhere</span>.</h1>
+      <p class="sub">
+        OmniDL unifies <strong>Spotify</strong>, <strong>YouTube</strong> and <strong>SoundCloud</strong>
+        behind one clean dashboard. Paste any link — it finds the best official-audio source,
+        tags it, and saves it to your machine. Runs entirely on your computer.
+      </p>
+      <div class="cta">
+        <a class="btn primary lg" href="/dashboard">Open the dashboard ▸</a>
+        <a class="btn lg" href="#how">See how it works</a>
+      </div>
+      <p class="note">Free &amp; open · works without a Spotify subscription · your downloads never leave your device</p>
+
+      <div class="shot-wrap">
+        <div class="app-shot">
+          <div class="chrome"><i class="r"></i><i class="y"></i><i class="g"></i><span class="url">127.0.0.1:8000/dashboard</span></div>
+          <div id="demo" class="demo"></div>
+        </div>
+      </div>
+
+      <div class="stats" style="margin-top:42px">
+        <div class="stat"><div class="num" data-target="3">0</div><div class="label">Sources unified</div></div>
+        <div class="stat"><div class="num" data-target="8" data-suffix="×">0</div><div class="label">Parallel downloads</div></div>
+        <div class="stat"><div class="num" data-target="6">0</div><div class="label">Audio formats</div></div>
+        <div class="stat"><div class="num" data-target="100" data-suffix="%">0</div><div class="label">Local &amp; private</div></div>
+      </div>
+    </section>
+
+    <section class="block wrap" id="features">
+      <div class="section-head">
+        <h2>Everything you need, nothing you don't</h2>
+        <p>One tool that replaces a pile of command-line scripts — with a UI you'll actually enjoy.</p>
+      </div>
+      <div class="features">
+        <div class="card"><div class="ico">🎧</div><h3>Spotify without Premium</h3><p>Reads playlists via the public page and fetches each track's official audio — no subscription, no developer app, no 403s.</p></div>
+        <div class="card"><div class="ico">✨</div><h3>Official-audio matching</h3><p>Matches every track to its YouTube Music studio master by artist + title + duration, so you get the clean version — not a random music video.</p></div>
+        <div class="card"><div class="ico">⚡</div><h3>Parallel downloads</h3><p>Grab several tracks at once, each with its own live progress line. Big playlists finish fast.</p></div>
+        <div class="card"><div class="ico">🏷️</div><h3>Proper tags &amp; artwork</h3><p>Writes real title, artist, album, track number and cover art onto every file with mutagen.</p></div>
+        <div class="card"><div class="ico">🖥️</div><h3>Live terminal</h3><p>Watch every download stream in real time in a clean in-browser console — collapse, copy, scroll.</p></div>
+        <div class="card"><div class="ico">📦</div><h3>Runs anywhere</h3><p>Use it from source or as a standalone one-click app. Light &amp; dark themes, persistent history.</p></div>
+      </div>
+    </section>
+
+    <section class="block wrap" id="how">
+      <div class="section-head">
+        <h2>Three steps to your library</h2>
+        <p>No setup rituals. Open it, paste, done.</p>
+      </div>
+      <div class="steps">
+        <div class="step"><h3>Open the dashboard</h3><p>Launch OmniDL locally — it opens in your browser at <code>127.0.0.1</code>. Nothing is exposed to the internet.</p></div>
+        <div class="step"><h3>Paste a link</h3><p>Drop in any Spotify, YouTube or SoundCloud URL (or just type a search). OmniDL auto-detects the source.</p></div>
+        <div class="step"><h3>Get clean audio</h3><p>It finds the best official source, downloads, tags, and drops the file in your chosen folder.</p></div>
+      </div>
+    </section>
+
+    <section class="block wrap" id="showcase">
+      <div class="section-head">
+        <h2>A dashboard you'll actually enjoy</h2>
+        <p>One clean control room: a smart bar, a live terminal, and a queue with real-time progress.</p>
+      </div>
+      <div class="shot-wrap">
+        <div class="app-shot">
+          <div class="chrome"><i class="r"></i><i class="y"></i><i class="g"></i><span class="url">127.0.0.1:8000/dashboard</span></div>
+          <img src="/static/img/dashboard.png" alt="The OmniDL dashboard downloading a playlist with a live terminal and queue" loading="lazy" />
+        </div>
+      </div>
+    </section>
+
+    <section class="block wrap">
+      <div class="section-head"><h2>Powered by best-in-class engines</h2><p>OmniDL orchestrates the tools the community trusts.</p></div>
+      <div class="engines">
+        <div class="engine spotify"><span class="d"></span> Spotify resolver</div>
+        <div class="engine youtube"><span class="d"></span> yt-dlp</div>
+        <div class="engine soundcloud"><span class="d"></span> scdl</div>
+      </div>
+    </section>
+
+    <section class="block wrap" id="faq">
+      <div class="section-head">
+        <h2>Frequently asked questions</h2>
+        <p>The short answers. The rest you'll discover in seconds.</p>
+      </div>
+      <div class="faq">
+        <details open><summary>Do I need Spotify Premium?</summary><p>No. OmniDL reads a playlist's track list from Spotify's public page — no login, no developer app, no Premium. It then fetches each track's official audio from YouTube Music, so you get the studio version without a subscription.</p></details>
+        <details><summary>Where do my downloads go, and is anything sent to a server?</summary><p>Files are saved to a folder you choose on your own computer. OmniDL runs locally on <code>127.0.0.1</code> with no accounts, no telemetry, and no OmniDL-operated server. Nothing about your activity leaves your device.</p></details>
+        <details><summary>What audio quality and formats do I get?</summary><p>By default OmniDL keeps the native <strong>opus</strong> stream (no quality-losing re-encode, ~half the size of a 320k MP3). You can switch to m4a, mp3, flac and more in Settings. Every file gets correct title, artist, album, track number and cover art.</p></details>
+        <details><summary>Can it handle big playlists?</summary><p>Yes — it pages through the full track list (100+ tracks) and downloads several at once, each with its own live progress line. Tracks already in your folder are skipped, so you can re-run a playlist to grab only what's missing.</p></details>
+        <details><summary>Is this legal?</summary><p>OmniDL is a general-purpose tool for personal use — backing up music you have the right to. You're responsible for complying with the terms of the services you use and copyright law. Please support the artists you love. See our <a href="/terms">Terms</a>.</p></details>
+        <details><summary>Do I need to install Python?</summary><p>Not necessarily. You can run it from source, or use the standalone build that bundles everything into a single app — just keep <code>ffmpeg</code> available. It works on a machine with no Python installed.</p></details>
+      </div>
+    </section>
+
+    <section class="block wrap">
+      <div class="cta-band">
+        <h2>Ready to build your library?</h2>
+        <p>It's local, free, and takes seconds to start.</p>
+        <a class="btn primary lg" href="/dashboard">Launch OmniDL ▸</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <div class="cols">
+        <div class="about">
+          <a class="brand" href="/"><span class="logo">◐</span> Omni<span class="accent">DL</span></a>
+          <p>A local, self-hosted music downloader that unifies Spotify, YouTube and SoundCloud. Your files, your machine.</p>
+        </div>
+        <div class="foot-links">
+          <div class="foot-col"><h4>Product</h4><a href="/dashboard">Dashboard</a><a href="/#features">Features</a><a href="/#how">How it works</a></div>
+          <div class="foot-col"><h4>Company</h4><a href="/about">About</a><a href="/privacy">Privacy</a><a href="/terms">Terms</a></div>
+        </div>
+      </div>
+      <div class="foot-bottom">
+        <span>© <span id="year">2026</span> OmniDL · Runs locally on your device.</span>
+        <span>For personal use. Respect the rights of content creators.</span>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/js/site.js"></script>
+  <script src="/static/js/bg.js"></script>
+  <script src="/static/js/demo.js"></script>
+  <script>
+    // Safety net: if the reveal observer never initialised, never leave content hidden.
+    window.addEventListener("load", function () {
+      setTimeout(function () {
+        if (!window.__omnidlReveal) {
+          document.querySelectorAll(".block .section-head,.block .app-shot,.block .card,.block .step,.block .engine,.block .cta-band,.block details")
+            .forEach(function (el) { el.classList.add("in"); });
+        }
+      }, 2500);
+    });
+  </script>
+</body>
+</html>

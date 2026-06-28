@@ -1,0 +1,12 @@
+config.json
+history.json
+downloads/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.part
+*.ytdl
+cookies.txt
+build/
+dist/
