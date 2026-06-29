@@ -24,29 +24,29 @@
 
   <main class="wrap doc">
     <h1>About OmniDL</h1>
-    <p class="updated">A unified, local-first music downloader.</p>
+    <p class="updated">A unified music &amp; video downloader.</p>
 
     <p>OmniDL grew out of a simple frustration: the free tools that let you keep a personal copy
     of your music kept breaking. Spotify locked its Web API behind Premium, downloaders scattered
     across half a dozen command-line scripts, and none of them were pleasant to use. OmniDL pulls
-    it all together into one clean, self-hosted dashboard.</p>
+    it all together into one clean dashboard.</p>
 
     <h2>What it does</h2>
     <p>Paste a Spotify, YouTube or SoundCloud link (or just type a search) and OmniDL figures out
     the best <strong>official-audio</strong> source, downloads it with <strong>yt-dlp</strong>,
     and writes proper metadata and cover art onto the file. For Spotify it reads the public
     playlist page and matches each track to its studio master — no Premium and no developer
-    credentials required.</p>
+    credentials required. Prefer the full video? Flip the <strong>Audio / Video</strong> toggle
+    and OmniDL grabs it as an MP4 (up to 4K) or MKV.</p>
 
     <h2>How it's built</h2>
-    <p>OmniDL is a small <strong>FastAPI</strong> app with a live WebSocket terminal, orchestrating
-    <strong>yt-dlp</strong>, <strong>scdl</strong> and the Spotify resolver. It runs entirely on
-    your machine — bound to <code>127.0.0.1</code> — and can be packaged into a single standalone
-    application that needs no Python install.</p>
+    <p>OmniDL is a <strong>FastAPI</strong> app with a live WebSocket terminal, orchestrating
+    <strong>yt-dlp</strong>, <strong>scdl</strong> and the Spotify resolver. The dashboard does the
+    matching, downloading and tagging for you and streams the progress back live.</p>
 
     <div class="callout">
-      <strong>Local by design.</strong> OmniDL has no servers, no accounts, and no telemetry.
-      Everything happens on your computer, and your downloads never leave it.
+      <strong>No friction.</strong> No Premium, no developer keys, and no sign-up — paste a link
+      and go. OmniDL is built for personal use; please support the artists you love.
     </div>
 
     <h2>Fair use</h2>
@@ -62,7 +62,7 @@
       <div class="cols">
         <div class="about">
           <a class="brand" href="/"><span class="logo">◐</span> Omni<span class="accent">DL</span></a>
-          <p>A local, self-hosted music downloader that unifies Spotify, YouTube and SoundCloud.</p>
+          <p>A unified downloader for Spotify, YouTube and SoundCloud — clean audio or full video.</p>
         </div>
         <div class="foot-links">
           <div class="foot-col"><h4>Product</h4><a href="/dashboard">Dashboard</a><a href="/#features">Features</a><a href="/#how">How it works</a></div>
@@ -70,7 +70,7 @@
         </div>
       </div>
       <div class="foot-bottom">
-        <span>© <span id="year">2026</span> OmniDL · Runs locally on your device.</span>
+        <span>© <span id="year">2026</span> OmniDL · Music &amp; video from the sources you already use.</span>
         <span>For personal use. Respect the rights of content creators.</span>
       </div>
     </div>

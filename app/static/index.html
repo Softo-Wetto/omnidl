@@ -21,7 +21,7 @@
       <a href="/" class="ghost home-btn" title="Back to homepage"><span class="home-ico">⌂</span> Home</a>
       <span id="conn" class="conn off" title="Connection status"><i></i>offline</span>
       <button id="theme-toggle" class="ghost icon-only" title="Toggle light / dark theme">☀</button>
-      <button id="open-folder" class="ghost" title="Open download folder">
+      <button id="open-folder" class="ghost" title="Open download folder" hidden>
         <span class="ico">📂</span> Folder
       </button>
       <button id="open-settings" class="ghost" title="Settings">
@@ -44,6 +44,10 @@
           <option value="youtube">YouTube</option>
           <option value="soundcloud">SoundCloud</option>
         </select>
+        <div id="media-toggle" class="media-toggle" role="group" aria-label="Audio or video">
+          <button type="button" class="mt-btn active" data-media="audio" title="Download audio">♪ Audio</button>
+          <button type="button" class="mt-btn" data-media="video" title="Download video — YouTube &amp; links only">▶ Video</button>
+        </div>
         <select id="format" title="Audio format"></select>
         <button id="download" class="primary">Download <span class="arr">▸</span></button>
       </div>
@@ -100,16 +104,12 @@
       </div>
       <div class="modal-body">
         <div class="field-note">
-          <strong>Spotify (403 workaround):</strong> Spotify's Web API now requires the
-          app owner to have Premium — even your own free dev app is blocked. OmniDL defaults
-          to <strong>Embed scrape</strong>: it reads the public Spotify embed page for the
-          track list (no API, no login, no Premium) and downloads each track via yt-dlp.
+          These preferences apply to <strong>your downloads only</strong> and are remembered
+          for this browser. Spotify links are resolved via the public embed page (no API, no
+          login, no Premium) and the audio is matched on YouTube.
         </div>
 
-        <div class="section-label">Spotify</div>
-        <label>Source
-          <select id="set-spotify-method"></select>
-        </label>
+        <div class="section-label">Matching</div>
         <label class="switch-row">
           <span>Prefer YouTube Music <span class="muted">(official "Topic" audio — no music-video intros/outros)</span></span>
           <input id="set-prefer-ytmusic" type="checkbox" class="switch" />
@@ -118,34 +118,27 @@
           <span>Match result to track length <span class="muted">(avoids mixes / live edits)</span></span>
           <input id="set-match-duration" type="checkbox" class="switch" />
         </label>
-        <div id="spotdl-creds" class="hidden">
-          <label>Client ID <span class="muted">(spotDL method only)</span>
-            <input id="set-client-id" type="text" autocomplete="off" />
-          </label>
-          <label>Client Secret <span class="muted">(spotDL method only)</span>
-            <input id="set-client-secret" type="password" autocomplete="off" />
-          </label>
-          <label>Filename template
-            <input id="set-template" type="text" placeholder="{artists} - {title}.{output-ext}" />
-          </label>
-        </div>
 
-        <div class="section-label">Audio &amp; output</div>
-        <label>Output folder
-          <input id="set-output-dir" type="text" autocomplete="off" />
+        <div class="section-label">Audio &amp; video</div>
+        <label id="output-dir-field" hidden>Output folder <span class="muted">(where files are saved)</span>
+          <input id="set-output-dir" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <label id="cookie-file-field" hidden>Cookies file <span class="muted">(optional cookies.txt — best fix for YouTube "unavailable" errors)</span>
+          <input id="set-cookie-file" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="C:\path\to\cookies.txt" />
         </label>
         <div class="row">
-          <label>Format
+          <label>Audio format
             <select id="set-format"></select>
           </label>
           <label>Bitrate
             <input id="set-bitrate" type="text" placeholder="320k / auto / disable" />
           </label>
-          <label>Threads
-            <input id="set-threads" type="number" min="1" max="16" />
+          <label>Video container <span class="muted">(video mode)</span>
+            <select id="set-video-container"></select>
           </label>
           <label>Parallel <span class="muted">(playlist)</span>
-            <input id="set-concurrency" type="number" min="1" max="8" />
+            <input id="set-concurrency" type="number" min="1" max="4" />
           </label>
         </div>
         <label class="switch-row">
@@ -156,16 +149,6 @@
           <span>Skip already-downloaded tracks <span class="muted">(resume playlists)</span></span>
           <input id="set-skip-existing" type="checkbox" class="switch" />
         </label>
-
-        <div class="section-label">Network / anti rate-limit</div>
-        <label>Cookies from browser <span class="muted">(yt-dlp)</span>
-          <select id="set-browser"></select>
-        </label>
-        <label>Cookie file path <span class="muted">(cookies.txt — spotDL &amp; yt-dlp)</span>
-          <input id="set-cookie-file" type="text" autocomplete="off"
-                 placeholder="optional — helps avoid YouTube rate-limits" />
-        </label>
-        <input id="set-text-engine" type="hidden" value="youtube" />
       </div>
       <div class="modal-foot">
         <span id="settings-status" class="status-msg"></span>

@@ -11,10 +11,13 @@ the live-streaming subprocess model intact without needing the tools on PATH.
 from __future__ import annotations
 
 import multiprocessing
+import os
 import sys
 
-HOST = "127.0.0.1"
-PORT = 8000
+# Bind locally by default; set OMNIDL_HOST=0.0.0.0 (behind a reverse proxy) to publish.
+HOST = os.environ.get("OMNIDL_HOST", "127.0.0.1")
+PORT = int(os.environ.get("OMNIDL_PORT", "8000"))
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", ""}
 
 
 def _run_tool() -> int:
@@ -63,12 +66,14 @@ def _serve() -> None:
 
     def _open_browser() -> None:
         time.sleep(1.5)
-        webbrowser.open(f"http://{HOST}:{PORT}")
+        webbrowser.open(f"http://127.0.0.1:{PORT}")
 
     from app.main import app
 
+    # Only pop a browser for a local, interactive launch — not when hosting headless.
+    if HOST in _LOCAL_HOSTS and "--no-browser" not in sys.argv:
+        threading.Thread(target=_open_browser, daemon=True).start()
     print(f"OmniDL running at http://{HOST}:{PORT}  (close this window to stop)")
-    threading.Thread(target=_open_browser, daemon=True).start()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info", loop="asyncio")
 
 

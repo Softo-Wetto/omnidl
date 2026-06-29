@@ -4,10 +4,13 @@ const $ = (sel) => document.querySelector(sel);
 
 const state = {
   settings: {},
-  meta: { engines: {}, formats: [], browsers: [], spotify_methods: ["embed", "spotdl"] },
+  meta: { engines: {}, formats: [], video_qualities: [], video_containers: [] },
   jobs: new Map(),
   order: [],
   viewingId: null,
+  mediaType: "audio",        // "audio" | "video" (per-download choice)
+  lastAudioFormat: null,     // remembered selection when toggling back to audio
+  lastVideoQuality: null,    // remembered selection when toggling back to video
 };
 
 const ENGINE_LABEL = { spotify: "Spotify", youtube: "YouTube", soundcloud: "SoundCloud" };
@@ -166,12 +169,47 @@ function detectEngine(text) {
   return "youtube"; // links to YT or any plain-text search go to yt-dlp
 }
 
+/* ---------------- audio / video mode ---------------- */
+function videoSupported(engine) {
+  // Video applies only to YouTube / generic links (yt-dlp). Spotify & SoundCloud are audio.
+  return engine === "youtube";
+}
+
+function refreshFormatOptions() {
+  const fmt = $("#format");
+  if (state.mediaType === "video") {
+    fillSelect(fmt, state.meta.video_qualities, state.lastVideoQuality || state.settings.video_quality || "1080p");
+    fmt.title = "Video quality";
+  } else {
+    fillSelect(fmt, state.meta.formats, state.lastAudioFormat || state.settings.audio_format);
+    fmt.title = "Audio format";
+  }
+}
+
+function setMediaType(type, { persist = true } = {}) {
+  state.mediaType = type === "video" ? "video" : "audio";
+  for (const btn of document.querySelectorAll("#media-toggle .mt-btn"))
+    btn.classList.toggle("active", btn.dataset.media === state.mediaType);
+  refreshFormatOptions();
+  if (persist) { try { localStorage.setItem("omnidl-media", state.mediaType); } catch (_) {} }
+}
+
+function updateMediaToggle(engine) {
+  // Disable Video for Spotify/SoundCloud; an empty box (engine === null) stays enabled.
+  const canVideo = engine ? videoSupported(engine) : true;
+  const toggle = $("#media-toggle");
+  toggle.classList.toggle("disabled", !canVideo);
+  toggle.querySelector('[data-media="video"]').disabled = !canVideo;
+  if (!canVideo && state.mediaType === "video") setMediaType("audio", { persist: false });
+}
+
 function updateChip() {
   const override = $("#engine").value;
   const text = $("#input").value;
   const chip = $("#detected");
   const hint = $("#hint");
   const engine = override === "auto" ? detectEngine(text) : override;
+  updateMediaToggle(engine);
   if (!engine) {
     chip.className = "chip";
     chip.textContent = "—";
@@ -179,13 +217,14 @@ function updateChip() {
     return;
   }
   chip.className = "chip " + engine;
-  const method = state.settings.spotify_method || "embed";
-  const tool = engine === "spotify" ? (method === "embed" ? "embed → yt-dlp" : "spotdl") : ENGINE_TOOL[engine];
+  const wantsVideo = state.mediaType === "video" && videoSupported(engine);
+  let tool = engine === "spotify" ? "embed → yt-dlp" : ENGINE_TOOL[engine];
+  if (wantsVideo) tool += " · video";
   chip.textContent = `${ENGINE_LABEL[engine]} · ${tool}`;
-  if (engine === "spotify" && method === "embed") {
+  if (wantsVideo) {
+    hint.textContent = `Full video → ${$("#format").value} (${state.settings.video_container || "mp4"}).`;
+  } else if (engine === "spotify") {
     hint.textContent = "Via public embed — no Spotify API, no Premium, no login needed.";
-  } else if (engine === "spotify" && !(state.settings.spotify_client_id && state.settings.spotify_client_secret)) {
-    hint.textContent = "⚠ spotDL method needs a Premium-owned app's Client ID/Secret (Settings).";
   } else if (engine === "soundcloud" && override !== "auto" && !text.toLowerCase().includes("soundcloud.com")) {
     hint.textContent = "scdl needs a SoundCloud URL (it can't search by text).";
   } else {
@@ -270,6 +309,13 @@ function renderQueue() {
     if (job.status === "running" || job.status === "queued") {
       actions.append(makeButton("Cancel", "Cancel", () => api(`/api/jobs/${id}/cancel`, "POST")));
     } else {
+      if (job.status === "done" && job.has_files) {
+        const save = makeButton("⤓ Save", "Download to this device", () => {
+          window.location.href = `/api/jobs/${id}/file`;
+        });
+        save.className = "save-btn";
+        actions.append(save);
+      }
       if (job.status === "error" || job.status === "cancelled") {
         actions.append(makeButton("↻ Retry", "Run again", () => retryJob(job)));
       }
@@ -331,8 +377,29 @@ async function viewJob(id) {
   } catch (_) {}
 }
 
+function downloadPayload(input, override) {
+  const payload = { input };
+  if (override && override !== "auto") payload.engine_override = override;
+  const engine = (override && override !== "auto") ? override : detectEngine(input);
+  if (state.mediaType === "video" && videoSupported(engine)) {
+    payload.media_type = "video";
+    payload.video_quality = $("#format").value;
+  } else {
+    payload.format = $("#format").value;
+  }
+  return payload;
+}
+
 function retryJob(job) {
-  const payload = { input: job.input, engine_override: job.engine, format: $("#format").value };
+  // Reproduce the original job's mode (audio vs video + format/quality), not the
+  // current toggle state.
+  const payload = { input: job.input, engine_override: job.engine };
+  if (job.media_type === "video" && videoSupported(job.engine)) {
+    payload.media_type = "video";
+    if (job.video_quality) payload.video_quality = job.video_quality;
+  } else if (job.audio_format) {
+    payload.format = job.audio_format;
+  }
   api("/api/download", "POST", payload);
   toast(`Re-queued: ${job.input}`, "info");
 }
@@ -376,8 +443,13 @@ function handleMessage(msg) {
       const wasActive = prev && !FINISHED.includes(prev.status);
       upsertJob(msg.job);
       if (msg.job.status === "running") {
-        state.viewingId = msg.job.id;
-        termClear(false);
+        // With several jobs running at once, only auto-focus if the user isn't already
+        // watching another live job (don't yank the terminal away from them).
+        const cur = state.jobs.get(state.viewingId);
+        if (!cur || FINISHED.includes(cur.status)) {
+          state.viewingId = msg.job.id;
+          termClear(false);
+        }
       } else if (wasActive && FINISHED.includes(msg.job.status)) {
         notifyFinished(msg.job);
       }
@@ -426,10 +498,7 @@ async function api(path, method = "GET", body) {
 async function submitDownload() {
   const input = $("#input").value.trim();
   if (!input) return;
-  const override = $("#engine").value;
-  const payload = { input, format: $("#format").value };
-  if (override !== "auto") payload.engine_override = override;
-  const job = await api("/api/download", "POST", payload);
+  const job = await api("/api/download", "POST", downloadPayload(input, $("#engine").value));
   if (job && job.engine_label) toast(`Queued · ${job.engine_label}`, "info");
   $("#input").value = "";
   updateChip();
@@ -448,54 +517,47 @@ function fillSelect(sel, items, current) {
   }
 }
 
-function toggleSpotdlCreds() {
-  $("#spotdl-creds").classList.toggle("hidden", $("#set-spotify-method").value !== "spotdl");
-}
-
 function loadSettingsForm() {
   const s = state.settings;
-  fillSelect($("#set-spotify-method"), state.meta.spotify_methods || ["embed", "spotdl"], s.spotify_method);
-  $("#set-client-id").value = s.spotify_client_id || "";
-  $("#set-client-secret").value = s.spotify_client_secret || "";
-  $("#set-output-dir").value = s.output_dir || "";
+  if (state.meta.local) {
+    $("#output-dir-field").hidden = false;
+    $("#set-output-dir").value = s.output_dir || "";
+    $("#cookie-file-field").hidden = false;
+    $("#set-cookie-file").value = s.cookie_file || "";
+  }
   $("#set-bitrate").value = s.bitrate || "";
-  $("#set-threads").value = s.threads || 4;
   $("#set-concurrency").value = s.concurrency || 3;
-  $("#set-template").value = s.spotify_template || "";
-  $("#set-cookie-file").value = s.cookie_file || "";
   $("#set-prefer-ytmusic").checked = s.prefer_ytmusic !== false;
   $("#set-match-duration").checked = s.spotify_match_duration !== false;
   $("#set-sponsorblock").checked = !!s.sponsorblock;
   $("#set-skip-existing").checked = s.skip_existing !== false;
   fillSelect($("#set-format"), state.meta.formats, s.audio_format);
-  fillSelect($("#set-browser"), state.meta.browsers, s.cookies_from_browser);
-  toggleSpotdlCreds();
+  fillSelect($("#set-video-container"), state.meta.video_containers, s.video_container || "mp4");
 }
 
 async function saveSettings() {
   const payload = {
-    spotify_method: $("#set-spotify-method").value,
-    spotify_client_id: $("#set-client-id").value.trim(),
-    spotify_client_secret: $("#set-client-secret").value.trim(),
-    output_dir: $("#set-output-dir").value.trim(),
     audio_format: $("#set-format").value,
+    video_container: $("#set-video-container").value,
     bitrate: $("#set-bitrate").value.trim(),
-    threads: $("#set-threads").value,
     concurrency: $("#set-concurrency").value,
-    spotify_template: $("#set-template").value.trim(),
-    cookie_file: $("#set-cookie-file").value.trim(),
-    cookies_from_browser: $("#set-browser").value,
     prefer_ytmusic: $("#set-prefer-ytmusic").checked,
     spotify_match_duration: $("#set-match-duration").checked,
     sponsorblock: $("#set-sponsorblock").checked,
     skip_existing: $("#set-skip-existing").checked,
   };
+  if (state.meta.local) {
+    payload.output_dir = $("#set-output-dir").value.trim();
+    payload.cookie_file = $("#set-cookie-file").value.trim();
+  }
   state.settings = await api("/api/settings", "POST", payload);
-  fillSelect($("#format"), state.meta.formats, state.settings.audio_format);
+  state.lastAudioFormat = state.settings.audio_format;
+  refreshFormatOptions();
   $("#settings-status").textContent = "Saved ✓";
   setTimeout(() => { $("#settings-status").textContent = ""; }, 2000);
   updateChip();
   toast("Settings saved", "success");
+  if (state.settings.cookie_warning) toast("⚠ " + state.settings.cookie_warning, "error", 6000);
 }
 
 function openSettings() { loadSettingsForm(); $("#settings-modal").classList.remove("hidden"); }
@@ -520,12 +582,25 @@ function bind() {
   $("#input").addEventListener("input", updateChip);
   $("#input").addEventListener("keydown", (e) => { if (e.key === "Enter") submitDownload(); });
   $("#engine").addEventListener("change", updateChip);
+  for (const btn of document.querySelectorAll("#media-toggle .mt-btn"))
+    btn.addEventListener("click", () => { if (!btn.disabled) { setMediaType(btn.dataset.media); updateChip(); } });
+  $("#format").addEventListener("change", () => {
+    if (state.mediaType === "video") state.lastVideoQuality = $("#format").value;
+    else state.lastAudioFormat = $("#format").value;
+    updateChip();
+  });
   $("#open-settings").onclick = openSettings;
   $("#close-settings").onclick = closeSettings;
   $("#save-settings").onclick = saveSettings;
   $("#theme-toggle").onclick = toggleTheme;
-  $("#set-spotify-method").addEventListener("change", toggleSpotdlCreds);
-  $("#open-folder").onclick = async () => { await api("/api/open-folder", "POST"); };
+  if (state.meta.local) {
+    const fb = $("#open-folder");
+    fb.hidden = false;
+    fb.onclick = async () => {
+      const r = await api("/api/open-folder", "POST");
+      if (r && r.error) toast(r.error, "error");
+    };
+  }
   $("#clear-term").onclick = () => termClear(true);
   $("#jump-latest").onclick = () => logView.jump();
   $("#copy-log").onclick = async () => {
@@ -556,7 +631,11 @@ async function init() {
   applyTheme(document.documentElement.classList.contains("light") ? "light" : "dark");
   state.meta = await api("/api/meta");
   state.settings = await api("/api/settings");
-  fillSelect($("#format"), state.meta.formats, state.settings.audio_format);
+  let savedMedia = "audio";
+  try { savedMedia = localStorage.getItem("omnidl-media") || "audio"; } catch (_) {}
+  const urlMedia = new URLSearchParams(location.search).get("media");  // ?media=video deep-link
+  if (urlMedia === "video" || urlMedia === "audio") savedMedia = urlMedia;
+  setMediaType(savedMedia, { persist: false });
   bind();
   updateChip();
   connect();

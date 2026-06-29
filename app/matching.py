@@ -44,6 +44,37 @@ def _similarity(left: str, right: str) -> float:
     return SequenceMatcher(None, left, right).ratio()
 
 
+# Words that describe a *version* or credit rather than the song itself. They're stripped
+# before comparing the distinctive words of two titles (so "X (slowed)" still matches "X").
+_TITLE_NOISE = {
+    "slowed", "sped", "up", "down", "reverb", "remix", "remixed", "flip", "edit",
+    "version", "feat", "ft", "featuring", "prod", "by", "official", "audio", "video",
+    "lyric", "lyrics", "remaster", "remastered", "mix", "pluggnb", "plugg", "jerk",
+    "the", "a", "an", "and", "x", "vs", "with",
+}
+
+
+def _core_tokens(title: str) -> set[str]:
+    """Distinctive words of a title (version/credit words and stop-words removed)."""
+    return {tok for tok in _normalise(title).split()
+            if len(tok) >= 2 and tok not in _TITLE_NOISE}
+
+
+def title_is_plausible(spotify_title: str, candidate_title: str) -> bool:
+    """True only if the candidate plausibly IS the requested song.
+
+    A candidate must contain at least half of the requested title's distinctive words.
+    This stops OmniDL from grabbing a same-artist, duration-matched but completely
+    different track (e.g. "Boogie (Slowed)" for "next door - jedag jedug - Slowed")
+    when the real one can't be downloaded — better nothing than the wrong song.
+    """
+    core = _core_tokens(spotify_title)
+    if not core:
+        return True  # nothing distinctive to check against; don't over-reject
+    needed = max(1, (len(core) + 1) // 2)
+    return len(core & _core_tokens(candidate_title)) >= needed
+
+
 def _duration_points(difference: int | None) -> int:
     if difference is None:
         return 0

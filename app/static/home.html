@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OmniDL — Your music, from anywhere</title>
-  <meta name="description" content="OmniDL is a local, self-hosted music downloader that unifies Spotify, YouTube, and SoundCloud behind one clean dashboard — no Premium, no API keys." />
+  <meta name="description" content="OmniDL unifies Spotify, YouTube, and SoundCloud in one clean dashboard — find the best official audio or download the full video, tagged and ready. No Premium, no API keys." />
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/css/site.css" />
   <script>document.documentElement.classList.add('js');try{if(localStorage.getItem('omnidl-theme')==='light')document.documentElement.classList.add('light');}catch(e){}</script>
@@ -29,22 +29,22 @@
 
   <main>
     <section class="hero wrap">
-      <span class="eyebrow"><span class="dot"></span> Local &amp; self-hosted · no Premium · no API keys</span>
+      <span class="eyebrow"><span class="dot"></span> Music &amp; video · no Premium · no API keys</span>
       <h1>Your music library, <span class="grad">from anywhere</span>.</h1>
       <p class="sub">
         OmniDL unifies <strong>Spotify</strong>, <strong>YouTube</strong> and <strong>SoundCloud</strong>
         behind one clean dashboard. Paste any link — it finds the best official-audio source,
-        tags it, and saves it to your machine. Runs entirely on your computer.
+        tags it, and can grab the full video too. No subscription and no developer keys.
       </p>
       <div class="cta">
         <a class="btn primary lg" href="/dashboard">Open the dashboard ▸</a>
         <a class="btn lg" href="#how">See how it works</a>
       </div>
-      <p class="note">Free &amp; open · works without a Spotify subscription · your downloads never leave your device</p>
+      <p class="note">Free to use · works without a Spotify subscription · music &amp; video, properly tagged</p>
 
       <div class="shot-wrap">
         <div class="app-shot">
-          <div class="chrome"><i class="r"></i><i class="y"></i><i class="g"></i><span class="url">127.0.0.1:8000/dashboard</span></div>
+          <div class="chrome"><i class="r"></i><i class="y"></i><i class="g"></i><span class="url">omnidl · dashboard</span></div>
           <div id="demo" class="demo"></div>
         </div>
       </div>
@@ -53,7 +53,7 @@
         <div class="stat"><div class="num" data-target="3">0</div><div class="label">Sources unified</div></div>
         <div class="stat"><div class="num" data-target="8" data-suffix="×">0</div><div class="label">Parallel downloads</div></div>
         <div class="stat"><div class="num" data-target="6">0</div><div class="label">Audio formats</div></div>
-        <div class="stat"><div class="num" data-target="100" data-suffix="%">0</div><div class="label">Local &amp; private</div></div>
+        <div class="stat"><div class="num" data-target="4" data-suffix="K">0</div><div class="label">Video up to 4K</div></div>
       </div>
     </section>
 
@@ -68,7 +68,7 @@
         <div class="card"><div class="ico">⚡</div><h3>Parallel downloads</h3><p>Grab several tracks at once, each with its own live progress line. Big playlists finish fast.</p></div>
         <div class="card"><div class="ico">🏷️</div><h3>Proper tags &amp; artwork</h3><p>Writes real title, artist, album, track number and cover art onto every file with mutagen.</p></div>
         <div class="card"><div class="ico">🖥️</div><h3>Live terminal</h3><p>Watch every download stream in real time in a clean in-browser console — collapse, copy, scroll.</p></div>
-        <div class="card"><div class="ico">📦</div><h3>Runs anywhere</h3><p>Use it from source or as a standalone one-click app. Light &amp; dark themes, persistent history.</p></div>
+        <div class="card"><div class="ico">🎬</div><h3>Music or full video</h3><p>One toggle switches between clean audio and the full video — MP4 up to 4K (H.264/AAC that plays everywhere), or MKV for the highest-quality codecs.</p></div>
       </div>
     </section>
 
@@ -78,9 +78,9 @@
         <p>No setup rituals. Open it, paste, done.</p>
       </div>
       <div class="steps">
-        <div class="step"><h3>Open the dashboard</h3><p>Launch OmniDL locally — it opens in your browser at <code>127.0.0.1</code>. Nothing is exposed to the internet.</p></div>
+        <div class="step"><h3>Open the dashboard</h3><p>Head to the dashboard in your browser — no install and no sign-up. You're ready in seconds.</p></div>
         <div class="step"><h3>Paste a link</h3><p>Drop in any Spotify, YouTube or SoundCloud URL (or just type a search). OmniDL auto-detects the source.</p></div>
-        <div class="step"><h3>Get clean audio</h3><p>It finds the best official source, downloads, tags, and drops the file in your chosen folder.</p></div>
+        <div class="step"><h3>Get audio or video</h3><p>It finds the best official source, downloads, tags it, and hands you the file — clean audio or the full video.</p></div>
       </div>
     </section>
 
@@ -91,7 +91,7 @@
       </div>
       <div class="shot-wrap">
         <div class="app-shot">
-          <div class="chrome"><i class="r"></i><i class="y"></i><i class="g"></i><span class="url">127.0.0.1:8000/dashboard</span></div>
+          <div class="chrome"><i class="r"></i><i class="y"></i><i class="g"></i><span class="url">omnidl · dashboard</span></div>
           <img src="/static/img/dashboard.png" alt="The OmniDL dashboard downloading a playlist with a live terminal and queue" loading="lazy" />
         </div>
       </div>
@@ -113,18 +113,18 @@
       </div>
       <div class="faq">
         <details open><summary>Do I need Spotify Premium?</summary><p>No. OmniDL reads a playlist's track list from Spotify's public page — no login, no developer app, no Premium. It then fetches each track's official audio from YouTube Music, so you get the studio version without a subscription.</p></details>
-        <details><summary>Where do my downloads go, and is anything sent to a server?</summary><p>Files are saved to a folder you choose on your own computer. OmniDL runs locally on <code>127.0.0.1</code> with no accounts, no telemetry, and no OmniDL-operated server. Nothing about your activity leaves your device.</p></details>
-        <details><summary>What audio quality and formats do I get?</summary><p>By default OmniDL keeps the native <strong>opus</strong> stream (no quality-losing re-encode, ~half the size of a 320k MP3). You can switch to m4a, mp3, flac and more in Settings. Every file gets correct title, artist, album, track number and cover art.</p></details>
+        <details><summary>Can I download video, not just audio?</summary><p>Yes. Flip the <strong>Audio / Video</strong> toggle and OmniDL grabs the full video as an MP4 — up to 4K, using H.264/AAC so it plays in every player. Prefer the highest-quality codecs? Switch the container to MKV in Settings.</p></details>
+        <details><summary>What audio quality and formats do I get?</summary><p>By default OmniDL keeps the native <strong>opus</strong> stream (no quality-losing re-encode, ~half the size of a 320k MP3). You can switch to m4a, mp3, flac and more in Settings. Every file gets correct title, artist, album, track number and cover art. For video, choose MP4 (most compatible) or MKV, up to 4K.</p></details>
         <details><summary>Can it handle big playlists?</summary><p>Yes — it pages through the full track list (100+ tracks) and downloads several at once, each with its own live progress line. Tracks already in your folder are skipped, so you can re-run a playlist to grab only what's missing.</p></details>
         <details><summary>Is this legal?</summary><p>OmniDL is a general-purpose tool for personal use — backing up music you have the right to. You're responsible for complying with the terms of the services you use and copyright law. Please support the artists you love. See our <a href="/terms">Terms</a>.</p></details>
-        <details><summary>Do I need to install Python?</summary><p>Not necessarily. You can run it from source, or use the standalone build that bundles everything into a single app — just keep <code>ffmpeg</code> available. It works on a machine with no Python installed.</p></details>
+        <details><summary>Where do my downloads go?</summary><p>When you start a download, OmniDL fetches the media and your browser saves the file like any other download. It's a hosted service, so requests are processed on our servers; there are no accounts, and we only keep standard server logs and basic analytics to run the site. See our <a href="/privacy">Privacy</a> page for details.</p></details>
       </div>
     </section>
 
     <section class="block wrap">
       <div class="cta-band">
         <h2>Ready to build your library?</h2>
-        <p>It's local, free, and takes seconds to start.</p>
+        <p>It's free, and takes seconds to start.</p>
         <a class="btn primary lg" href="/dashboard">Launch OmniDL ▸</a>
       </div>
     </section>
@@ -135,7 +135,7 @@
       <div class="cols">
         <div class="about">
           <a class="brand" href="/"><span class="logo">◐</span> Omni<span class="accent">DL</span></a>
-          <p>A local, self-hosted music downloader that unifies Spotify, YouTube and SoundCloud. Your files, your machine.</p>
+          <p>A unified downloader for Spotify, YouTube and SoundCloud — clean audio or full video, properly tagged.</p>
         </div>
         <div class="foot-links">
           <div class="foot-col"><h4>Product</h4><a href="/dashboard">Dashboard</a><a href="/#features">Features</a><a href="/#how">How it works</a></div>
@@ -143,7 +143,7 @@
         </div>
       </div>
       <div class="foot-bottom">
-        <span>© <span id="year">2026</span> OmniDL · Runs locally on your device.</span>
+        <span>© <span id="year">2026</span> OmniDL · Music &amp; video from the sources you already use.</span>
         <span>For personal use. Respect the rights of content creators.</span>
       </div>
     </div>

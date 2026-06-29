@@ -27,40 +27,50 @@
     <p class="updated">Last updated: 2026</p>
 
     <div class="callout">
-      <strong>Short version:</strong> OmniDL runs entirely on your own computer. There is no
-      OmniDL server, no account, and no analytics. We never see your activity or your files.
+      <strong>Short version:</strong> OmniDL is a hosted service. To download something, the link
+      or search you submit is processed on our servers. We keep standard server logs and basic,
+      aggregate analytics to run and protect the site. There are no accounts, and we don't sell
+      your data.
     </div>
 
-    <h2>What we collect</h2>
-    <p><strong>Nothing.</strong> OmniDL has no backend service operated by us and sends no
-    telemetry. It does not transmit your searches, links, downloads, or settings to any OmniDL-run
-    server — because there isn't one.</p>
-
-    <h2>Data stored on your device</h2>
-    <p>To work, OmniDL keeps a few files locally on your machine:</p>
+    <h2>What we process</h2>
+    <p>When you start a download, your request goes to our server, which fetches the requested
+    audio or video from the relevant source and returns the file to your browser. To do that — and
+    to keep the service running and abuse-free — we handle:</p>
     <ul>
-      <li><strong>Settings</strong> (<code>config.json</code>) — your output folder, format and
-      preferences, including any optional Spotify credentials you enter.</li>
-      <li><strong>History</strong> (<code>history.json</code>) — your recent download jobs and logs,
-      so they survive a restart.</li>
-      <li><strong>Theme choice</strong> — stored in your browser's local storage.</li>
-      <li><strong>Your downloaded audio</strong> — saved to the folder you choose.</li>
+      <li><strong>Request data</strong> — the link or search you submit, the format/quality you
+      choose, and timestamps, while your job is processed.</li>
+      <li><strong>Server logs</strong> — standard technical logs such as your IP address, browser
+      user-agent, and the requests made, used for operation, security and troubleshooting.</li>
+      <li><strong>Analytics</strong> — aggregate usage statistics (e.g. page views and feature
+      use) so we can understand traffic and improve OmniDL.</li>
     </ul>
-    <p>These never leave your computer. Delete them at any time to clear that data.</p>
+
+    <h2>What we don't do</h2>
+    <p>No accounts and no passwords. We don't sell or rent your personal data, and we don't use it
+    to build advertising profiles.</p>
+
+    <h2>On your device</h2>
+    <p>OmniDL stores your <strong>theme choice</strong> and a couple of UI preferences in your
+    browser's local storage. Files you download are saved by your browser to wherever you choose.</p>
 
     <h2>Third-party services</h2>
-    <p>When you download, OmniDL connects directly from your device to the relevant services
-    (e.g. YouTube, SoundCloud, Spotify's public pages) to fetch content. Those services have their
-    own privacy policies and may log requests coming from your IP address, exactly as a browser
-    would. OmniDL is not affiliated with any of them.</p>
+    <p>To fulfil a download, our server connects to the relevant services (e.g. YouTube,
+    SoundCloud, Spotify's public pages) to fetch content. Those services have their own privacy
+    policies and may log the requests. OmniDL is an independent project and is not affiliated with,
+    endorsed by, or sponsored by any of them.</p>
 
     <h2>Cookies</h2>
-    <p>OmniDL itself sets no tracking cookies. If you optionally provide a browser cookie file to
-    improve download reliability, it is used only locally to authenticate your own requests.</p>
+    <p>OmniDL needs no login cookies to work. Our analytics may set a cookie or similar identifier
+    to measure traffic; you can block these in your browser without affecting downloads.</p>
+
+    <h2>Data retention</h2>
+    <p>Processed media, server logs and analytics are kept only as long as needed to provide and
+    secure the service, then routinely removed.</p>
 
     <h2>Changes</h2>
-    <p>Because OmniDL is local software, "privacy" is mostly a matter of what the app does on your
-    machine. Any change to that behaviour will be reflected on this page.</p>
+    <p>We may update this policy as OmniDL evolves. Material changes will be reflected here, with a
+    new date above.</p>
 
     <p style="margin-top:32px"><a class="btn" href="/about">← About</a> <a class="btn" href="/terms">Terms →</a></p>
   </main>
@@ -70,7 +80,7 @@
       <div class="cols">
         <div class="about">
           <a class="brand" href="/"><span class="logo">◐</span> Omni<span class="accent">DL</span></a>
-          <p>A local, self-hosted music downloader. Your files, your machine.</p>
+          <p>A unified downloader for Spotify, YouTube and SoundCloud — clean audio or full video.</p>
         </div>
         <div class="foot-links">
           <div class="foot-col"><h4>Product</h4><a href="/dashboard">Dashboard</a><a href="/#features">Features</a></div>
@@ -78,7 +88,7 @@
         </div>
       </div>
       <div class="foot-bottom">
-        <span>© <span id="year">2026</span> OmniDL · Runs locally on your device.</span>
+        <span>© <span id="year">2026</span> OmniDL · Music &amp; video from the sources you already use.</span>
         <span>For personal use. Respect the rights of content creators.</span>
       </div>
     </div>

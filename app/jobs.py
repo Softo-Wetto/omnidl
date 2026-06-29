@@ -5,7 +5,9 @@ import asyncio
 import codecs
 import glob
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -13,9 +15,25 @@ import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import candidate_search, engines
-from .matching import MatchDecision, decide_match
+from .matching import MatchDecision, decide_match, title_is_plausible
 from .review_report import TrackOutcome, write_review_report
-from .settings import PROJECT_ROOT, load_settings
+from . import settings as settings_mod
+from .settings import DOWNLOAD_ROOT, FILE_TTL_SECONDS, PROJECT_ROOT, load_settings
+
+# How many jobs run concurrently. Each job may itself spawn several track downloads, so
+# keep this modest; tune with OMNIDL_WORKERS for your host. (Was effectively 1.)
+_WORKER_COUNT = max(1, min(8, int(os.environ.get("OMNIDL_WORKERS", "2"))))
+
+# Per-session abuse limits (independent of how many global workers exist).
+_MAX_ACTIVE_PER_SESSION = 3          # queued + running at once
+_RATE_MAX = 40                       # submissions ...
+_RATE_WINDOW = 3600                  # ... per hour, per session
+
+# YouTube's "Video unavailable" under load is usually transient, so re-try the SAME
+# candidate a couple of times (with backoff) before giving up on it — this stops a momentary
+# hiccup on the correct match from cascading into a wrong-song fallback.
+_DL_ATTEMPTS = 3
+_DL_BACKOFF = 2.5                    # seconds, multiplied by the attempt number
 
 # Persisted job history (survives restarts).
 _HISTORY_PATH = PROJECT_ROOT / "history.json"
@@ -144,7 +162,7 @@ class ToolOutputFormatter:
 class Job:
     def __init__(self, input_text: str, engine: str, argv: list[str] | None,
                  display_cmd: str, *, spotify_url: str | None = None,
-                 settings: dict | None = None):
+                 settings: dict | None = None, session: str = ""):
         self.id = uuid.uuid4().hex[:12]
         self.input = input_text
         self.engine = engine
@@ -152,6 +170,8 @@ class Job:
         self.display_cmd = display_cmd
         self.spotify_url = spotify_url
         self.settings = settings or {}
+        self.session = session           # owning visitor; scopes visibility + files
+        self.out_dir: Path | None = None  # per-job download folder
         self.status = "queued"  # queued | running | done | error | cancelled
         self.code: int | None = None
         self.created = time.time()
@@ -166,6 +186,15 @@ class Job:
         self.output += text
         if len(self.output) > _OUTPUT_CAP:
             self.output = self.output[-_OUTPUT_CAP:]
+
+    def list_files(self) -> list[Path]:
+        """Files this job produced, available to download (newest run only)."""
+        if not self.out_dir or not self.out_dir.exists():
+            return []
+        return sorted(p for p in self.out_dir.iterdir() if p.is_file())
+
+    def has_files(self) -> bool:
+        return bool(self.list_files())
 
     def to_dict(self) -> dict:
         meta = engines.ENGINES.get(self.engine, {"label": self.engine, "tool": self.engine})
@@ -182,6 +211,11 @@ class Job:
             "finished": self.finished,
             "progress": self.progress,
             "label": self.label,
+            # Mode used for this job, so "retry" reproduces it exactly (audio vs video).
+            "media_type": self.settings.get("media_type", "audio"),
+            "video_quality": self.settings.get("video_quality"),
+            "audio_format": self.settings.get("audio_format"),
+            "has_files": self.status == "done" and self.has_files(),
         }
 
     def to_record(self) -> dict:
@@ -189,12 +223,16 @@ class Job:
         rec = self.to_dict()
         rec["output"] = self.output[-_HISTORY_OUTPUT_CAP:]
         rec["spotify_url"] = self.spotify_url
+        rec["session"] = self.session
+        rec["out_dir"] = str(self.out_dir) if self.out_dir else None
         return rec
 
     @classmethod
     def from_record(cls, rec: dict) -> "Job":
         job = cls(rec.get("input", ""), rec.get("engine", "youtube"), None, "",
-                  spotify_url=rec.get("spotify_url"))
+                  spotify_url=rec.get("spotify_url"), session=rec.get("session", ""))
+        if rec.get("out_dir"):
+            job.out_dir = Path(rec["out_dir"])
         job.id = rec.get("id", job.id)
         status = rec.get("status", "done")
         job.output = rec.get("output", "")
@@ -208,6 +246,12 @@ class Job:
         job.finished = rec.get("finished")
         job.progress = rec.get("progress")
         job.label = rec.get("label", "")
+        # Keep the mode fields so a retry from history still reproduces the original job.
+        job.settings = {
+            "media_type": rec.get("media_type", "audio"),
+            "video_quality": rec.get("video_quality"),
+            "audio_format": rec.get("audio_format"),
+        }
         return job
 
 
@@ -216,15 +260,17 @@ class JobManager:
         self.jobs: dict[str, Job] = {}
         self.order: list[str] = []
         self.queue: asyncio.Queue[str] = asyncio.Queue()
-        self.subscribers: set = set()
-        self.current: Job | None = None
-        self._worker_task: asyncio.Task | None = None
+        self.subscribers: dict = {}              # websocket -> session id
+        self._worker_tasks: list[asyncio.Task] = []
+        self._cleanup_task: asyncio.Task | None = None
+        self._submit_times: dict[str, list[float]] = {}  # session -> recent submit times
 
     # ----- lifecycle -----------------------------------------------------
     def start(self) -> None:
-        if self._worker_task is None:
+        if not self._worker_tasks:
             self._load_history()
-            self._worker_task = asyncio.create_task(self._worker())
+            self._worker_tasks = [asyncio.create_task(self._worker()) for _ in range(_WORKER_COUNT)]
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
     # ----- persistence ---------------------------------------------------
     def _load_history(self) -> None:
@@ -246,77 +292,142 @@ class JobManager:
             pass
 
     # ----- websocket fan-out --------------------------------------------
-    async def broadcast(self, message: dict) -> None:
+    async def broadcast(self, message: dict, session: str | None = None) -> None:
+        """Send to every subscriber, or only those in `session` when given."""
         dead = []
-        for ws in list(self.subscribers):
+        for ws, sid in list(self.subscribers.items()):
+            if session is not None and sid != session:
+                continue
             try:
                 await ws.send_json(message)
             except Exception:
                 dead.append(ws)
         for ws in dead:
-            self.subscribers.discard(ws)
+            self.subscribers.pop(ws, None)
 
-    def snapshot(self) -> dict:
-        active = self.current
-        if active is None and self.order:
-            active = self.jobs.get(self.order[-1])
+    async def _send(self, job: Job, message: dict) -> None:
+        """Broadcast a job event only to the visitor that owns the job."""
+        await self.broadcast(message, session=job.session)
+
+    def _session_jobs(self, session: str) -> list[Job]:
+        return [self.jobs[i] for i in self.order if i in self.jobs and self.jobs[i].session == session]
+
+    def list_jobs(self, session: str) -> list[dict]:
+        return [j.to_dict() for j in self._session_jobs(session)]
+
+    def snapshot(self, session: str) -> dict:
+        jobs = self._session_jobs(session)
+        running = [j for j in jobs if j.status == "running"]
+        active = running[-1] if running else (jobs[-1] if jobs else None)
         return {
             "type": "snapshot",
-            "jobs": [self.jobs[i].to_dict() for i in self.order if i in self.jobs],
+            "jobs": [j.to_dict() for j in jobs],
             "active_id": active.id if active else None,
             "output": active.output if active else "",
         }
 
+    # ----- rate limiting -------------------------------------------------
+    def _active_count(self, session: str) -> int:
+        return sum(1 for j in self.jobs.values()
+                   if j.session == session and j.status in ("queued", "running"))
+
+    def check_limit(self, session: str) -> str | None:
+        """Return an error message if this session may not submit right now, else None."""
+        if self._active_count(session) >= _MAX_ACTIVE_PER_SESSION:
+            return f"Too many active downloads (max {_MAX_ACTIVE_PER_SESSION}). Let one finish first."
+        now = time.time()
+        recent = [t for t in self._submit_times.get(session, []) if now - t < _RATE_WINDOW]
+        self._submit_times[session] = recent
+        if len(recent) >= _RATE_MAX:
+            return "Hourly download limit reached for this session. Please try again later."
+        return None
+
     # ----- submission ----------------------------------------------------
-    async def submit(self, input_text: str, engine_override: str | None = None,
-                     overrides: dict | None = None) -> Job:
-        s = load_settings()
-        if overrides:
-            s = {**s, **{k: v for k, v in overrides.items() if v}}
+    async def submit(self, input_text: str, settings_dict: dict, session: str,
+                     engine_override: str | None = None) -> Job:
+        s = dict(settings_dict)
         if engine_override in engines.ENGINES:
             engine = engine_override
         else:
             engine = engines.detect_engine(input_text, s)
 
-        # Spotify (default "embed" method): no single command â€” resolve via the embed
-        # page, then download each track with yt-dlp. spotdl method is opt-in.
-        if engine == "spotify" and s.get("spotify_method", "embed") == "embed":
-            job = Job(input_text, engine, None,
-                      "resolve Spotify via public embed (no API / no Premium)",
-                      spotify_url=input_text, settings=s)
+        job = Job(input_text, engine, None, "", session=session, settings=s)
+        if settings_mod.LOCAL_MODE:
+            # Personal mode: write straight to the user's configured folder. out_dir stays
+            # None so nothing here is ever auto-deleted (it's the user's library).
+            out_dir = Path(s.get("output_dir") or DOWNLOAD_ROOT)
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            s["output_dir"] = str(out_dir)
         else:
-            argv = engines.build_command(engine, input_text, s)
-            job = Job(input_text, engine, argv, engines.describe_command(argv), settings=s)
+            # Hosted mode: each job gets its own isolated folder, so we know exactly which
+            # files it produced and can hand only those to the visitor who created it.
+            out_dir = DOWNLOAD_ROOT / session / job.id
+            try:
+                out_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            job.out_dir = out_dir
+            s["output_dir"] = str(out_dir)
+
+        if engine == "spotify" and s.get("spotify_method", "embed") == "embed":
+            job.spotify_url = input_text
+            job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
+        else:
+            job.argv = engines.build_command(engine, input_text, s)
+            job.display_cmd = engines.describe_command(job.argv)
+
         self.jobs[job.id] = job
         self.order.append(job.id)
+        self._submit_times.setdefault(session, []).append(time.time())
         self.queue.put_nowait(job.id)
-        await self.broadcast({"type": "job_added", "job": job.to_dict()})
+        await self._send(job, {"type": "job_added", "job": job.to_dict()})
         self._persist()
         return job
 
-    async def cancel(self, job_id: str) -> bool:
+    async def cancel(self, job_id: str, session: str) -> bool:
         job = self.jobs.get(job_id)
-        if job is None:
+        if job is None or job.session != session:
             return False
         if job.status == "running":
             job.status = "cancelled"
             self._kill(job)
         elif job.status == "queued":
             job.status = "cancelled"
-            await self.broadcast({"type": "status", "job": job.to_dict()})
+            await self._send(job, {"type": "status", "job": job.to_dict()})
             self._persist()
         return True
 
-    async def delete(self, job_id: str) -> bool:
+    async def delete(self, job_id: str, session: str) -> bool:
         job = self.jobs.get(job_id)
-        if job is None or job.status == "running":
+        if job is None or job.session != session or job.status == "running":
             return False
         self.jobs.pop(job_id, None)
         if job_id in self.order:
             self.order.remove(job_id)
-        await self.broadcast({"type": "removed", "job_id": job_id})
+        self._remove_files(job)
+        await self._send(job, {"type": "removed", "job_id": job_id})
         self._persist()
         return True
+
+    @staticmethod
+    def _remove_files(job: Job) -> None:
+        if job.out_dir and job.out_dir.exists():
+            shutil.rmtree(job.out_dir, ignore_errors=True)
+
+    async def _cleanup_loop(self) -> None:
+        """Delete finished jobs' files once they age out, to bound disk use."""
+        while True:
+            await asyncio.sleep(300)
+            now = time.time()
+            for job in list(self.jobs.values()):
+                if job.status in ("done", "error", "cancelled") and job.finished \
+                        and now - job.finished > FILE_TTL_SECONDS:
+                    if job.out_dir and job.out_dir.exists():
+                        self._remove_files(job)
+                        await self._send(job, {"type": "status", "job": job.to_dict()})
 
     # ----- internals -----------------------------------------------------
     def _kill(self, job: Job) -> None:
@@ -342,9 +453,9 @@ class JobManager:
 
     async def _emit(self, job: Job, text: str) -> None:
         job.append(text)
-        await self.broadcast({"type": "output", "job_id": job.id, "data": text})
+        await self._send(job, {"type": "output", "job_id": job.id, "data": text})
         if self._update_progress(job, text):
-            await self.broadcast({
+            await self._send(job, {
                 "type": "progress", "job_id": job.id,
                 "progress": job.progress, "label": job.label,
             })
@@ -354,10 +465,10 @@ class JobManager:
         Only the final state (store=True) is kept in the job log for reconnect replay."""
         if store:
             job.append(text)
-        await self.broadcast({"type": "output", "job_id": job.id, "data": text, "key": key})
+        await self._send(job, {"type": "output", "job_id": job.id, "data": text, "key": key})
 
     async def _key_done(self, job: Job, key: str) -> None:
-        await self.broadcast({"type": "key_done", "job_id": job.id, "key": key})
+        await self._send(job, {"type": "key_done", "job_id": job.id, "key": key})
 
     @staticmethod
     def _update_progress(job: Job, text: str) -> bool:
@@ -434,10 +545,9 @@ class JobManager:
             job.procs.discard(proc)
 
     async def _run_job(self, job: Job) -> None:
-        self.current = job
         job.status = "running"
         job.started = time.time()
-        await self.broadcast({"type": "status", "job": job.to_dict()})
+        await self._send(job, {"type": "status", "job": job.to_dict()})
         try:
             if job.argv is None:
                 await self._run_spotify_job(job)
@@ -457,12 +567,11 @@ class JobManager:
         finally:
             job.finished = time.time()
             job.procs.clear()
-            self.current = None
             colour = {"done": "32", "cancelled": "33", "error": "31"}.get(job.status, "0")
             await self._emit(
                 job, f"\x1b[{colour}m[{job.status}] exit={job.code}\x1b[0m\r\n"
             )
-            await self.broadcast({"type": "status", "job": job.to_dict()})
+            await self._send(job, {"type": "status", "job": job.to_dict()})
             self._persist()
 
     async def _run_spotify_job(self, job: Job) -> None:
@@ -480,36 +589,64 @@ class JobManager:
         if total and concurrency > 1:
             await self._emit(job, f"\x1b[2m   ↳ downloading {concurrency} at a time (compact per-track log)\x1b[0m\r\n")
 
-        counts = {"ok": 0, "skip": 0, "fail": 0, "done": 0}
-        unresolved: list[TrackOutcome] = []
+        outcomes: dict[int, TrackOutcome] = {}
+        tracks_by_index: dict[int, object] = {}
+        done = {"n": 0}
         lock = asyncio.Lock()
         sem = asyncio.Semaphore(concurrency)
+        detailed = concurrency == 1
 
         async def handle(index: int, track) -> None:
             async with sem:
                 if job.status == "cancelled":
                     return
-                detailed = concurrency == 1
                 async with lock:
                     job.label = track.query
                     job.progress = int((index - 1) / total * 100) if total else 0
-                await self.broadcast({"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
+                await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
                 outcome = await self._fetch_track(job, track, settings, detailed, index, total)
                 if outcome.status == "cancelled":
                     return
-                result = "ok" if outcome.status in ("downloaded", "downloaded_for_review") else "skip" if outcome.status == "skipped" else "fail"
                 async with lock:
-                    counts[result] += 1
-                    counts["done"] += 1
-                    if outcome.status in ("downloaded_for_review", "no_candidate", "rejected", "download_failed"):
-                        unresolved.append(outcome)
-                    job.progress = int(counts["done"] / total * 100) if total else 100
+                    outcomes[index] = outcome
+                    tracks_by_index[index] = track
+                    done["n"] += 1
+                    job.progress = int(done["n"] / total * 100) if total else 100
                     job.label = track.query
-                await self.broadcast({"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
+                await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
 
         await asyncio.gather(*(handle(i, track) for i, track in enumerate(tracks, start=1)))
 
+        # Retry sweep: tracks that *failed to download* a real match (had attempts) usually
+        # lost a transient YouTube-throttling roll during the burst. Re-try them one at a
+        # time, after the burst, when the throttling has eased — the correct song is there.
         if job.status != "cancelled":
+            retryable = [i for i, o in outcomes.items()
+                         if o.status == "download_failed" and o.failed_attempts]
+            if retryable:
+                await self._emit(job, f"\r\n\x1b[33m↻ retrying {len(retryable)} track(s) that hit YouTube "
+                                       f"throttling \x1b[2m(one at a time)\x1b[0m\r\n")
+                for i in retryable:
+                    if job.status == "cancelled":
+                        break
+                    await asyncio.sleep(4)  # let the rate-limit window pass
+                    retry = await self._fetch_track(job, tracks_by_index[i], settings, True, i, total)
+                    if retry.status != "cancelled":
+                        outcomes[i] = retry
+
+        if job.status != "cancelled":
+            counts = {"ok": 0, "skip": 0, "fail": 0}
+            unresolved: list[TrackOutcome] = []
+            for outcome in outcomes.values():
+                if outcome.status in ("downloaded", "downloaded_for_review"):
+                    counts["ok"] += 1
+                elif outcome.status == "skipped":
+                    counts["skip"] += 1
+                else:
+                    counts["fail"] += 1
+                if outcome.status in ("downloaded_for_review", "no_candidate", "rejected", "download_failed"):
+                    unresolved.append(outcome)
+
             report_path: Path | None = None
             if unresolved:
                 report_path = await self._emit_review_report(job, Path(settings["output_dir"]), resolved.name, unresolved)
@@ -582,10 +719,17 @@ class JobManager:
                 await status("\x1b[33m🚫 no source found; added to review report\x1b[0m", store=True)
                 return await finish(TrackOutcome(track, "no_candidate", "no external candidates found", []))
 
-            # Try candidates best-first; fall back to the next when a download fails
-            # (SoundCloud results in particular are frequently not actually fetchable).
+            # Only ever download a candidate that plausibly IS this song. A high score
+            # alone isn't enough: a same-artist, same-length but totally different track
+            # must never be saved just because the real one was unavailable.
+            eligible = [d for d in decisions
+                        if d.accepted or title_is_plausible(track.title, d.candidate.title)]
+
+            # Try eligible candidates best-first; fall back to the next when a download
+            # fails (SoundCloud results in particular are often not actually fetchable).
             selected = None
-            for decision in decisions[:5]:
+            attempts: list[MatchDecision] = []
+            for decision in eligible[:5]:
                 if job.status == "cancelled":
                     return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
                 cand = decision.candidate
@@ -593,21 +737,42 @@ class JobManager:
                 async def progress(info: str, _c=cand) -> None:
                     await status(f"\x1b[36m⏳ {info} \x1b[2m({_c.source})\x1b[0m")
 
-                await status(f"\x1b[2m⏳ trying {cand.source} (score {decision.score}/100)...\x1b[0m")
-                code = await self._stream_subprocess(
-                    job, engines.media_url_command(cand.url, track.filename, settings),
-                    emit=detailed, progress_cb=None if detailed else progress)
-                self._cleanup_sidecars(out_dir, track.filename, ext)
-                if code == 0 and target.exists():
+                # Retry the same candidate before moving on (transient YouTube throttling).
+                ok = False
+                for attempt in range(1, _DL_ATTEMPTS + 1):
+                    if job.status == "cancelled":
+                        return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
+                    suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
+                    await status(f"\x1b[2m⏳ trying {cand.source} (score {decision.score}/100){suffix}...\x1b[0m")
+                    code = await self._stream_subprocess(
+                        job, engines.media_url_command(cand.url, track.filename, settings),
+                        emit=detailed, progress_cb=None if detailed else progress)
+                    self._cleanup_sidecars(out_dir, track.filename, ext)
+                    if code == 0 and target.exists():
+                        ok = True
+                        break
+                    if attempt < _DL_ATTEMPTS and job.status != "cancelled":
+                        await status(f"\x1b[2m{cand.source} hiccup - retrying...\x1b[0m")
+                        await asyncio.sleep(_DL_BACKOFF * attempt)
+                if ok:
                     selected = decision
                     break
-                await status(f"\x1b[2m{cand.source} unavailable - trying next source\x1b[0m")
+                attempts.append(decision)
+                tag = "verified match" if decision.accepted else f"score {decision.score}/100"
+                await status(f"\x1b[2m{cand.source} ({tag}) unavailable - trying next source\x1b[0m")
 
             if job.status == "cancelled":
                 return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
             if selected is None:
-                await status("\x1b[31m✗ all sources failed; added to review\x1b[0m", store=True)
-                return await finish(TrackOutcome(track, "download_failed", "all candidate downloads failed", decisions[:5]))
+                if attempts:
+                    msg, reason = "all matching sources failed to download", "all candidate downloads failed"
+                else:
+                    msg, reason = "no confident match found (skipped to avoid a wrong song)", "no confident match available"
+                await status(f"\x1b[31m✗ {msg}; added to review\x1b[0m", store=True)
+                return await finish(TrackOutcome(
+                    track, "download_failed", reason,
+                    decisions[:5], failed_attempts=tuple(attempts),
+                ))
 
             await asyncio.to_thread(self._tag, target, track)
             review_reason = "verified match" if selected.accepted else selected.reason
@@ -617,7 +782,12 @@ class JobManager:
                 await status(f"\x1b[32m✓ saved\x1b[0m {tail}", store=True)
             else:
                 await status(f"\x1b[33m✓ saved for review\x1b[0m {tail}", store=True)
-            return await finish(TrackOutcome(track, result, "verified match" if selected.accepted else review_reason, decisions[:5]))
+            return await finish(TrackOutcome(
+                track, result,
+                "verified match" if selected.accepted else review_reason,
+                decisions[:5], selected=selected, saved_as=target.name,
+                failed_attempts=tuple(attempts),
+            ))
         except FileNotFoundError as exc:
             await status(f"\x1b[31m✗ {exc}\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "download_failed", str(exc), []))

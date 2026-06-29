@@ -10,6 +10,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import settings as _settings
+
 ENGINES = {
     "spotify": {"label": "Spotify", "tool": "spotdl"},
     "youtube": {"label": "YouTube", "tool": "yt-dlp"},
@@ -81,6 +83,37 @@ def _spotify_cmd(text: str, s: dict) -> list[str]:
     return cmd
 
 
+def _ytdlp_common(s: dict) -> list[str]:
+    """yt-dlp args shared by the audio and video paths (JS runtime, cookies, SponsorBlock)."""
+    # YouTube throttles bursts of requests with a transient "Video unavailable". Retry
+    # within yt-dlp (cheap; only kicks in on failure) so one hiccup doesn't doom a track.
+    cmd: list[str] = [
+        "--retries", "5",
+        "--extractor-retries", "3",
+        "--retry-sleep", "3",
+        "--socket-timeout", "20",
+    ]
+    # Modern yt-dlp needs a JS runtime for YouTube; use Node if it's available
+    # (silences the deprecation warning and unlocks all formats).
+    node = shutil.which("node")
+    if node:
+        cmd += ["--js-runtimes", f"node:{node}"]
+    cookie_file = s.get("cookie_file")
+    browser = s.get("cookies_from_browser", "none")
+    if cookie_file:
+        cmd += ["--cookies", cookie_file]
+    elif browser and browser != "none":
+        cmd += ["--cookies-from-browser", browser]
+    if s.get("sponsorblock"):
+        # Trim non-music sections (intros/outros/offtopic) from music videos.
+        cmd += ["--sponsorblock-remove", "music_offtopic"]
+    # Optional PO-token provider: only active when OMNIDL_POT_PROVIDER_URL is set and the
+    # bgutil yt-dlp plugin is installed; otherwise this line is simply absent.
+    if _settings.POT_PROVIDER_URL:
+        cmd += ["--extractor-args", f"youtubepot-bgutilhttp:base_url={_settings.POT_PROVIDER_URL}"]
+    return cmd
+
+
 def _ytdlp_base(s: dict, out_template: str) -> list[str]:
     """Common yt-dlp args (audio extraction, metadata, cookies, JS runtime)."""
     cmd = [
@@ -94,28 +127,58 @@ def _ytdlp_base(s: dict, out_template: str) -> list[str]:
     # trigger a needless, bloated re-encode instead of remuxing the native stream.
     if s["audio_format"] == "mp3":
         cmd += ["--audio-quality", "0"]
-    # Modern yt-dlp needs a JS runtime for YouTube; use Node if it's available
-    # (silences the deprecation warning and unlocks all formats).
-    node = shutil.which("node")
-    if node:
-        cmd += ["--js-runtimes", f"node:{node}"]
     if s["audio_format"] in _THUMBNAIL_OK:
         cmd.append("--embed-thumbnail")
-    cookie_file = s.get("cookie_file")
-    browser = s.get("cookies_from_browser", "none")
-    if cookie_file:
-        cmd += ["--cookies", cookie_file]
-    elif browser and browser != "none":
-        cmd += ["--cookies-from-browser", browser]
-    if s.get("sponsorblock"):
-        # Trim non-music sections (intros/outros/offtopic) from music videos.
-        cmd += ["--sponsorblock-remove", "music_offtopic"]
-    return cmd
+    return cmd + _ytdlp_common(s)
+
+
+_VIDEO_HEIGHTS = {"2160p": 2160, "1440p": 1440, "1080p": 1080,
+                  "720p": 720, "480p": 480, "360p": 360}
+
+
+def _video_format_selector(quality: str, container: str) -> str:
+    """yt-dlp -f selector for a quality label, capped by height and aware of the container.
+
+    mp4: prefer H.264 video + AAC (m4a) audio so the file plays in *every* player.
+    YouTube's "best audio" is Opus, and Opus-in-mp4 is silent in many players
+    (Windows Media Player, QuickTime, TVs); AAC avoids that with no re-encoding.
+    Fallbacks keep AAC audio even at 4K (where only VP9/AV1 video exists).
+
+    mkv: natively holds VP9/AV1 video and Opus audio, so just take the outright best.
+    """
+    height = _VIDEO_HEIGHTS.get(quality)
+    cap = f"[height<={height}]" if height else ""
+    if container == "mkv":
+        return f"bv*{cap}+ba/b{cap}/bv*+ba/b"
+    return (
+        f"bv*{cap}[vcodec^=avc]+ba[ext=m4a]/"  # H.264 + AAC (most compatible)
+        f"bv*{cap}+ba[ext=m4a]/"               # any video + AAC (e.g. 4K VP9/AV1)
+        f"bv*{cap}+ba/"                         # any video + any audio
+        f"b{cap}/b"                             # progressive / anything
+    )
+
+
+def _ytdlp_video_base(s: dict, out_template: str) -> list[str]:
+    """yt-dlp args to download full video (not audio-only), merged to one container."""
+    container = s.get("video_container") or "mp4"
+    cmd = [
+        *_tool_cmd("yt-dlp"),
+        "-f", _video_format_selector(s.get("video_quality", "1080p"), container),
+        "--merge-output-format", container,
+        "--embed-metadata",
+        "--newline",
+        "-o", out_template,
+    ]
+    return cmd + _ytdlp_common(s)
 
 
 def _youtube_cmd(text: str, s: dict) -> list[str]:
     out_template = str(Path(s["output_dir"]) / "%(title)s.%(ext)s")
-    cmd = _ytdlp_base(s, out_template)
+    # Video mode applies to YouTube and any pasted link; audio is the default.
+    if s.get("media_type") == "video":
+        cmd = _ytdlp_video_base(s, out_template)
+    else:
+        cmd = _ytdlp_base(s, out_template)
     cmd.append(text if is_url(text) else f"ytsearch1:{text}")
     return cmd
 
