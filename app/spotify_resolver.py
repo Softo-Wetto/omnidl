@@ -1,4 +1,4 @@
-"""Resolve Spotify track/album/playlist URLs to a track list WITHOUT the Web API.
+﻿"""Resolve Spotify track/album/playlist URLs to a track list WITHOUT the Web API.
 
 Spotify's Web API now returns 403 for any app whose owner isn't Premium (this includes
 your own free developer app), which breaks spotDL entirely. Instead we read the public
@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.request
 from dataclasses import dataclass
+from urllib.error import HTTPError
 
 _ID_RE = re.compile(r"(track|album|playlist|artist)[/:]([A-Za-z0-9]+)")
 _NEXT_RE = re.compile(
@@ -68,8 +70,8 @@ def _clean(s: str | None) -> str:
         return ""
     return (
         s.replace("\xa0", " ")
-        .replace("�", " ")
-        .replace("’", "'")
+        .replace("ï¿½", " ")
+        .replace("â€™", "'")
         .strip()
         .strip(",")
         .strip()
@@ -138,7 +140,20 @@ def _token(html: str) -> str | None:
 
 def _api(url: str, token: str, timeout: int = 20):
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "User-Agent": _UA})
-    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+    # Spotify's anonymous web-player token is periodically rate-limited. Its
+    # Retry-After header tells us how long to wait; without this, a large
+    # playlist silently falls back to the 100-track embed preview.
+    for attempt in range(3):
+        try:
+            return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+        except HTTPError as exc:
+            if exc.code != 429 or attempt == 2:
+                raise
+            try:
+                delay = float(exc.headers.get("Retry-After", "1"))
+            except (TypeError, ValueError):
+                delay = 1.0
+            time.sleep(max(0.0, min(delay, 10.0)))
 
 
 def _cover(images) -> str:
@@ -224,8 +239,14 @@ def resolve(text: str, timeout: int = 20) -> Resolved:
                 full = []
             if full:
                 return Resolved(kind, name, full)
-        except Exception:
-            pass  # fall back to the (capped, basic) embed track list
+        except Exception as exc:
+            if kind == "playlist" and len(embed_tracks) >= 100:
+                raise ValueError(
+                    "Spotify could not retrieve the complete playlist after rate-limit retries. "
+                    "Nothing was downloaded; please retry in a few minutes."
+                ) from exc
+            # Short playlists are complete in the embed response, so retain that safe fallback.
+            pass
 
     if not embed_tracks:
         raise ValueError("No tracks found for this Spotify link")

@@ -1,6 +1,6 @@
-"""Engine detection and command (argv) construction for the three downloaders.
+﻿"""Engine detection and command (argv) construction for the three downloaders.
 
-All commands are returned as argv *lists* and executed with shell=False, so a pasted
+All commands are returned as argv lists and executed with shell=False, so a pasted
 URL or search term is always a single argument and can never inject shell commands.
 """
 from __future__ import annotations
@@ -18,9 +18,7 @@ ENGINES = {
     "soundcloud": {"label": "SoundCloud", "tool": "scdl"},
 }
 
-# Formats that support an embedded cover thumbnail in yt-dlp.
 _THUMBNAIL_OK = {"mp3", "m4a", "flac", "opus", "ogg"}
-
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
@@ -38,8 +36,6 @@ def detect_engine(text: str, settings: dict) -> str:
         return "soundcloud"
     if "youtube.com" in t or "youtu.be" in t:
         return "youtube"
-    # Plain-text search: only YouTube can be searched (Spotify's API is dead and scdl
-    # needs a URL), so a typed query always routes to yt-dlp.
     return "youtube"
 
 
@@ -85,16 +81,12 @@ def _spotify_cmd(text: str, s: dict) -> list[str]:
 
 def _ytdlp_common(s: dict) -> list[str]:
     """yt-dlp args shared by the audio and video paths (JS runtime, cookies, SponsorBlock)."""
-    # YouTube throttles bursts of requests with a transient "Video unavailable". Retry
-    # within yt-dlp (cheap; only kicks in on failure) so one hiccup doesn't doom a track.
     cmd: list[str] = [
         "--retries", "5",
         "--extractor-retries", "3",
         "--retry-sleep", "3",
         "--socket-timeout", "20",
     ]
-    # Modern yt-dlp needs a JS runtime for YouTube; use Node if it's available
-    # (silences the deprecation warning and unlocks all formats).
     node = shutil.which("node")
     if node:
         cmd += ["--js-runtimes", f"node:{node}"]
@@ -105,10 +97,7 @@ def _ytdlp_common(s: dict) -> list[str]:
     elif browser and browser != "none":
         cmd += ["--cookies-from-browser", browser]
     if s.get("sponsorblock"):
-        # Trim non-music sections (intros/outros/offtopic) from music videos.
         cmd += ["--sponsorblock-remove", "music_offtopic"]
-    # Optional PO-token provider: only active when OMNIDL_POT_PROVIDER_URL is set and the
-    # bgutil yt-dlp plugin is installed; otherwise this line is simply absent.
     if _settings.POT_PROVIDER_URL:
         cmd += ["--extractor-args", f"youtubepot-bgutilhttp:base_url={_settings.POT_PROVIDER_URL}"]
     return cmd
@@ -123,10 +112,10 @@ def _ytdlp_base(s: dict, out_template: str) -> list[str]:
         "--newline",
         "-o", out_template,
     ]
-    # Only force top quality for mp3 (a lossy transcode anyway). For opus/m4a this would
-    # trigger a needless, bloated re-encode instead of remuxing the native stream.
+    # MP3 needs an ffmpeg transcode. 192K preserves excellent music quality without the
+    # unexpectedly large files made by VBR-0 ("best"). Opus/m4a stay remuxed, not re-encoded.
     if s["audio_format"] == "mp3":
-        cmd += ["--audio-quality", "0"]
+        cmd += ["--audio-quality", "192K"]
     if s["audio_format"] in _THUMBNAIL_OK:
         cmd.append("--embed-thumbnail")
     return cmd + _ytdlp_common(s)
@@ -137,29 +126,21 @@ _VIDEO_HEIGHTS = {"2160p": 2160, "1440p": 1440, "1080p": 1080,
 
 
 def _video_format_selector(quality: str, container: str) -> str:
-    """yt-dlp -f selector for a quality label, capped by height and aware of the container.
-
-    mp4: prefer H.264 video + AAC (m4a) audio so the file plays in *every* player.
-    YouTube's "best audio" is Opus, and Opus-in-mp4 is silent in many players
-    (Windows Media Player, QuickTime, TVs); AAC avoids that with no re-encoding.
-    Fallbacks keep AAC audio even at 4K (where only VP9/AV1 video exists).
-
-    mkv: natively holds VP9/AV1 video and Opus audio, so just take the outright best.
-    """
+    """Return yt-dlp's video selector, capped by height and aware of container support."""
     height = _VIDEO_HEIGHTS.get(quality)
     cap = f"[height<={height}]" if height else ""
     if container == "mkv":
         return f"bv*{cap}+ba/b{cap}/bv*+ba/b"
     return (
-        f"bv*{cap}[vcodec^=avc]+ba[ext=m4a]/"  # H.264 + AAC (most compatible)
-        f"bv*{cap}+ba[ext=m4a]/"               # any video + AAC (e.g. 4K VP9/AV1)
-        f"bv*{cap}+ba/"                         # any video + any audio
-        f"b{cap}/b"                             # progressive / anything
+        f"bv*{cap}[vcodec^=avc]+ba[ext=m4a]/"
+        f"bv*{cap}+ba[ext=m4a]/"
+        f"bv*{cap}+ba/"
+        f"b{cap}/b"
     )
 
 
 def _ytdlp_video_base(s: dict, out_template: str) -> list[str]:
-    """yt-dlp args to download full video (not audio-only), merged to one container."""
+    """yt-dlp args to download full video, merged to one container."""
     container = s.get("video_container") or "mp4"
     cmd = [
         *_tool_cmd("yt-dlp"),
@@ -174,7 +155,6 @@ def _ytdlp_video_base(s: dict, out_template: str) -> list[str]:
 
 def _youtube_cmd(text: str, s: dict) -> list[str]:
     out_template = str(Path(s["output_dir"]) / "%(title)s.%(ext)s")
-    # Video mode applies to YouTube and any pasted link; audio is the default.
     if s.get("media_type") == "video":
         cmd = _ytdlp_video_base(s, out_template)
     else:
@@ -198,12 +178,7 @@ def media_url_command(url: str, out_basename: str, s: dict) -> list[str]:
 
 def youtube_track_command(query: str, out_basename: str, s: dict,
                           duration: int = 0) -> list[str]:
-    """yt-dlp command to fetch ONE track via search, named from Spotify metadata.
-
-    When the Spotify track duration is known and matching is on, search the top few
-    results and keep the first whose length is within a window of the real track —
-    this avoids hour-long mixes, sped-up edits, and 10-minute live versions.
-    """
+    """yt-dlp command to fetch ONE track via search, named from Spotify metadata."""
     out_template = str(Path(s["output_dir"]) / f"{out_basename}.%(ext)s")
     cmd = _ytdlp_base(s, out_template)
     if duration and duration > 0 and s.get("spotify_match_duration", True):
@@ -242,10 +217,9 @@ def build_command(engine: str, text: str, settings: dict) -> list[str]:
 def describe_command(argv: list[str]) -> str:
     """Printable command line with secrets redacted, for the terminal header."""
     tokens = list(argv)
-    # Collapse the launcher prefix down to the tool name for readability.
-    if len(tokens) >= 3 and tokens[1] == "--run-tool":          # frozen: exe --run-tool TOOL
+    if len(tokens) >= 3 and tokens[1] == "--run-tool":
         tokens = tokens[2:]
-    elif tokens[:4] == [sys.executable, "-u", "-m", "spotdl"]:   # dev: python -u -m spotdl
+    elif tokens[:4] == [sys.executable, "-u", "-m", "spotdl"]:
         tokens = ["spotdl", *tokens[4:]]
     elif tokens and tokens[0] == sys.executable:
         tokens = ["python", *tokens[1:]]
