@@ -1,41 +1,41 @@
-﻿# OmniDL
+# OmniDL
 
 One local web app that wraps **spotDL**, **yt-dlp**, and **scdl** behind a single smart
 input bar and one live terminal. Paste any Spotify / YouTube / SoundCloud link (or type a
-search) â€” OmniDL auto-detects the right engine, streams the live download output into an
+search) — OmniDL auto-detects the right engine, streams the live download output into an
 in-browser terminal, and drops the audio into your output folder.
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚ Paste link or searchâ€¦            [Download â–¸]  â”‚
-â”‚ detected: â— Spotify Â· embed â†’ yt-dlp           â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚ Resolving Spotify link via public embedâ€¦       â”‚
-â”‚ Found 23 track(s) in playlist "My Mix".        â”‚
-â”‚ [1/23] Artist A - Song A   [######    ] 61%    â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+┌───────────────────────────────────────────────┐
+│ Paste link or search…            [Download ▸]  │
+│ detected: ● Spotify · embed → yt-dlp           │
+├───────────────────────────────────────────────┤
+│ Resolving Spotify link via public embed…       │
+│ Found 23 track(s) in playlist "My Mix".        │
+│ [1/23] Artist A - Song A   [######    ] 61%    │
+└───────────────────────────────────────────────┘
 ```
 
-## Why this exists â€” the Spotify 403
+## Why this exists — the Spotify 403
 
 spotDL fails with:
 
 ```
-SpotifyException: http status: 403 â€” Active premium subscription required for the owner of the app.
+SpotifyException: http status: 403 — Active premium subscription required for the owner of the app.
 ```
 
 This is **not** a spotDL bug, and the old advice to "make your own free developer app" **no
-longer works** â€” Spotify's Web API now requires the *owner of the app* to have Premium, and
+longer works** — Spotify's Web API now requires the *owner of the app* to have Premium, and
 that applies to your own free app too (verified with a direct API call: a freshly-minted
 token from a free-account app still gets 403 on the playlist endpoint).
 
 **OmniDL's fix: skip the Web API entirely.** For Spotify links it uses the **Embed scrape**
-method by default â€” it reads the public `open.spotify.com/embed/...` page for the track list
+method by default — it reads the public `open.spotify.com/embed/...` page for the track list
 (artist + title), then downloads each track with **yt-dlp**. That needs **no API, no login,
 no credentials, and no Premium**. Just paste a Spotify track / album / playlist URL and go.
 Files are named `Artist - Title` from the Spotify metadata.
 
-> spotDL is still bundled and selectable (**Settings â†’ Spotify source â†’ spotdl**) for anyone
+> spotDL is still bundled and selectable (**Settings → Spotify source → spotdl**) for anyone
 > whose developer app *is* owned by a Premium account, but **Embed** is the default and the
 > one that works for free.
 
@@ -58,31 +58,31 @@ This installs `fastapi`, `uvicorn`, `spotdl`, `yt-dlp`, and `scdl`.
 python run.py
 ```
 
-â€¦or just double-click **`start.bat`** on Windows. It serves on
-<http://127.0.0.1:8000> (local-only â€” not exposed to your network) and opens your browser.
+…or just double-click **`start.bat`** on Windows. It serves on
+<http://127.0.0.1:8000> (local-only — not exposed to your network) and opens your browser.
 
 ## Usage
 
-- **Paste a link** â€” the engine chip shows which tool will be used (auto-detected):
-  - `open.spotify.com` / `spotify:` â†’ **Embed scrape â†’ yt-dlp** (per track)
-  - `youtube.com` / `youtu.be` â†’ **yt-dlp**
-  - `soundcloud.com` â†’ **scdl**
-- **Type a search** (no URL) â€” routed to a **yt-dlp** YouTube search.
+- **Paste a link** — the engine chip shows which tool will be used (auto-detected):
+  - `open.spotify.com` / `spotify:` → **Embed scrape → yt-dlp** (per track)
+  - `youtube.com` / `youtu.be` → **yt-dlp**
+  - `soundcloud.com` → **scdl**
+- **Type a search** (no URL) — routed to a **yt-dlp** YouTube search.
 - Use the **engine dropdown** to force a specific tool, and the **format dropdown** for a
   one-off format override.
 - The **queue** runs jobs one at a time (avoids YouTube rate-limits) and shows a live
   per-job progress bar, current track, and a status summary. Click any job to view its log.
 - **Cancel** kills the running process tree; **Cancel all** / **Clear finished** manage the
-  whole queue; **â†» Retry** re-runs a failed or cancelled job. Toasts confirm each action.
+  whole queue; **↻ Retry** re-runs a failed or cancelled job. Toasts confirm each action.
 - The **live output** panel is a clean log: repeating progress lines collapse into one
   updating line, output is colour-coded, and it scrolls natively (drag the bar or use the
-  wheel). **Copy** grabs the whole log; a **â†“ Jump to latest** pill appears if you scroll up.
-- **Skip already-downloaded tracks** (on by default) lets you re-run a playlist to fetch
-  only what's missing.
-- **Parallel downloads** â€” Settings â†’ *Parallel* (default 3, up to 8) downloads that many
+  wheel). **Copy** grabs the whole log; a **↓ Jump to latest** pill appears if you scroll up.
+- **Skip already-downloaded tracks** (on by default) indexes nested folders and matches
+  artist, title, and duration across formats, so an existing MP3 can prevent a duplicate Opus download.
+- **Parallel downloads** — Settings → *Parallel* (default 3, up to 8) downloads that many
   playlist tracks at once for a big speedup. At >1 the log switches to a compact per-track
-  checklist (`âœ“ [12/64] Artist â€” Title`); at 1 you get the detailed per-track stream.
-- **Persistent history** â€” your queue/history and each job's log are saved to `history.json`
+  checklist (`✓ [12/64] Artist — Title`); at 1 you get the detailed per-track stream.
+- **Persistent history** — your queue/history and each job's log are saved to `history.json`
   and restored on restart. Jobs that were mid-download when the app closed show as
   *cancelled (interrupted)*.
 - **Light / dark theme** — the ☀ / 🌙 button in the top bar toggles a light theme; your
@@ -121,9 +121,20 @@ back to the first 100 from the embed.
 track number, and cover art, and writes them onto the file with `mutagen` (overriding the
 YouTube source's tags) so your library shows correct artist / title / album / artwork.
 
-**File format.** Default is now **m4a** â€” YouTube Music serves AAC, so it's remuxed without a
+**File format.** Default is now **m4a** — YouTube Music serves AAC, so it's remuxed without a
 quality-losing re-encode and is much smaller than a transcoded 320k MP3. Pick mp3/flac/opus
 in Settings if you prefer.
+
+### Music library review
+
+Click **Library** in local mode to scan the configured output folder recursively. The review
+shows total size, metadata issues, duplicate groups, comparable quality scores, the recommended
+copy to keep, and potential space savings. It covers files OmniDL downloaded and music that was
+already in nested folders.
+
+Repairs are deliberately opt-in: **Fill artist/title** only fills missing fields when the filename
+unambiguously follows `Artist - Title`; it never overwrites existing tags. Library review never
+deletes, renames, or overwrites audio files.
 
 ## Build a standalone app (no Python needed to run)
 
@@ -134,15 +145,15 @@ machine without Python installed):
 build_exe.bat            # or:  python -m PyInstaller OmniDL.spec --noconfirm
 ```
 
-The result is **`dist/OmniDL/OmniDL.exe`** (a folder bundle â€” ship the whole `OmniDL`
+The result is **`dist/OmniDL/OmniDL.exe`** (a folder bundle — ship the whole `OmniDL`
 folder). `config.json` and `downloads/` are created next to the exe on first run.
 
 **ffmpeg is still required** and must be on your PATH (or drop `ffmpeg.exe` into the
 `OmniDL` folder). The bundle does not include ffmpeg.
 
 > How it works: in frozen mode OmniDL re-invokes itself as
-> `OmniDL.exe --run-tool <spotdl|yt-dlp|scdl> â€¦` and dispatches to the bundled module, so
-> each download is still a separate streaming subprocess â€” no tools on PATH needed.
+> `OmniDL.exe --run-tool <spotdl|yt-dlp|scdl> …` and dispatches to the bundled module, so
+> each download is still a separate streaming subprocess — no tools on PATH needed.
 
 ## Settings reference
 
@@ -163,7 +174,7 @@ folder). `config.json` and `downloads/` are created next to the exe on first run
 ### Avoiding YouTube rate-limits
 
 Large playlists can trip YouTube's bot checks. Export a `cookies.txt` (e.g. with a
-"Get cookies.txt" browser extension) and set its path in **Settings â†’ Cookie file**, or pick
+"Get cookies.txt" browser extension) and set its path in **Settings → Cookie file**, or pick
 a browser under **Cookies from browser** so yt-dlp authenticates as you.
 
 ## Notes

@@ -1,4 +1,4 @@
-﻿"""Job manager: async subprocess execution, live output streaming, FIFO queue, cancel."""
+"""Job manager: async subprocess execution, live output streaming, FIFO queue, cancel."""
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import candidate_search, engines
+from .library import build_library_index
 from .matching import MatchDecision, decide_match, title_is_plausible
 from .review_report import TrackOutcome, write_review_report
 from . import settings as settings_mod
@@ -236,9 +237,9 @@ class Job:
         job.id = rec.get("id", job.id)
         status = rec.get("status", "done")
         job.output = rec.get("output", "")
-        if status in ("running", "queued"):  # never finished â€” server had stopped
+        if status in ("running", "queued"):  # never finished — server had stopped
             status = "cancelled"
-            job.output += "\r\n\x1b[33m[interrupted â€” server was restarted]\x1b[0m\r\n"
+            job.output += "\r\n\x1b[33m[interrupted — server was restarted]\x1b[0m\r\n"
         job.status = status
         job.code = rec.get("code")
         job.created = rec.get("created", time.time())
@@ -585,9 +586,20 @@ class JobManager:
         total = len(tracks)
         await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
 
+        if settings.get("skip_existing", True):
+            await self._emit(job, "\x1b[2m   Indexing existing music across folders and formats...\x1b[0m\r\n")
+            try:
+                settings["_library_index"] = await asyncio.to_thread(
+                    build_library_index, Path(settings["output_dir"]),
+                )
+                indexed = len(settings["_library_index"].tracks)
+                await self._emit(job, f"\x1b[2m   Indexed {indexed} existing audio file{'s' if indexed != 1 else ''}.\x1b[0m\r\n")
+            except OSError as exc:
+                await self._emit(job, f"\x1b[33m   Could not index existing music: {exc}\x1b[0m\r\n")
+
         concurrency = max(1, min(8, int(settings.get("concurrency", 1) or 1)))
         if total and concurrency > 1:
-            await self._emit(job, f"\x1b[2m   ↳ downloading {concurrency} at a time (compact per-track log)\x1b[0m\r\n")
+            await self._emit(job, f"\x1b[2m   ? downloading {concurrency} at a time (compact per-track log)\x1b[0m\r\n")
 
         outcomes: dict[int, TrackOutcome] = {}
         tracks_by_index: dict[int, object] = {}
@@ -624,7 +636,7 @@ class JobManager:
             retryable = [i for i, o in outcomes.items()
                          if o.status == "download_failed" and o.failed_attempts]
             if retryable:
-                await self._emit(job, f"\r\n\x1b[33m↻ retrying {len(retryable)} track(s) that hit YouTube "
+                await self._emit(job, f"\r\n\x1b[33m? retrying {len(retryable)} track(s) that hit YouTube "
                                        f"throttling \x1b[2m(one at a time)\x1b[0m\r\n")
                 for i in retryable:
                     if job.status == "cancelled":
@@ -663,7 +675,7 @@ class JobManager:
         try:
             path = await asyncio.to_thread(write_review_report, output_dir, playlist_name, outcomes)
         except OSError as exc:
-            await self._emit(job, f"\x1b[31m✗ Could not write review report: {exc}\x1b[0m\r\n")
+            await self._emit(job, f"\x1b[31m? Could not write review report: {exc}\x1b[0m\r\n")
             return None
         await self._emit(job, f"\x1b[33m\U0001f4c4 Review report: {path}\x1b[0m\r\n")
         return path
@@ -697,11 +709,19 @@ class JobManager:
         if detailed:
             await self._emit(job, f"\r\n{label}\r\n")
         if settings.get("skip_existing", True) and target.exists():
-            await status("\x1b[33m⏭ already downloaded\x1b[0m", store=True)
+            await status("\x1b[33m? already downloaded\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "skipped", "output file already exists", []))
+        if settings.get("skip_existing", True) and settings.get("_library_index"):
+            existing = settings["_library_index"].find(track.artist, track.title, track.duration)
+            if existing is not None:
+                relative = existing.relative_path
+                await status(f"\x1b[33m? already in library\x1b[0m \x1b[2m({relative})\x1b[0m", store=True)
+                return await finish(TrackOutcome(
+                    track, "skipped", f"matching library file already exists: {relative}", [],
+                ))
 
         try:
-            await status("\x1b[2m🔍 searching sources...\x1b[0m")
+            await status("\x1b[2m?? searching sources...\x1b[0m")
             candidates = await asyncio.to_thread(candidate_search.search_all, track.artist, track.title)
             decisions = [decide_match(track.artist, track.title, track.duration, c) for c in candidates]
             # Highest score wins; tie-break: reliable source, then artist, title, closeness.
@@ -716,7 +736,7 @@ class JobManager:
                 reverse=True,
             )
             if not decisions:
-                await status("\x1b[33m🚫 no source found; added to review report\x1b[0m", store=True)
+                await status("\x1b[33m?? no source found; added to review report\x1b[0m", store=True)
                 return await finish(TrackOutcome(track, "no_candidate", "no external candidates found", []))
 
             # Only ever download a candidate that plausibly IS this song. A high score
@@ -735,7 +755,7 @@ class JobManager:
                 cand = decision.candidate
 
                 async def progress(info: str, _c=cand) -> None:
-                    await status(f"\x1b[36m⏳ {info} \x1b[2m({_c.source})\x1b[0m")
+                    await status(f"\x1b[36m? {info} \x1b[2m({_c.source})\x1b[0m")
 
                 # Retry the same candidate before moving on (transient YouTube throttling).
                 ok = False
@@ -743,7 +763,7 @@ class JobManager:
                     if job.status == "cancelled":
                         return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
                     suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
-                    await status(f"\x1b[2m⏳ trying {cand.source} (score {decision.score}/100){suffix}...\x1b[0m")
+                    await status(f"\x1b[2m? trying {cand.source} (score {decision.score}/100){suffix}...\x1b[0m")
                     code = await self._stream_subprocess(
                         job, engines.media_url_command(cand.url, track.filename, settings),
                         emit=detailed, progress_cb=None if detailed else progress)
@@ -768,7 +788,7 @@ class JobManager:
                     msg, reason = "all matching sources failed to download", "all candidate downloads failed"
                 else:
                     msg, reason = "no confident match found (skipped to avoid a wrong song)", "no confident match available"
-                await status(f"\x1b[31m✗ {msg}; added to review\x1b[0m", store=True)
+                await status(f"\x1b[31m? {msg}; added to review\x1b[0m", store=True)
                 return await finish(TrackOutcome(
                     track, "download_failed", reason,
                     decisions[:5], failed_attempts=tuple(attempts),
@@ -779,9 +799,9 @@ class JobManager:
             result = "downloaded" if selected.accepted else "downloaded_for_review"
             tail = f"\x1b[2m{target.name} ({selected.candidate.source}, {selected.score}/100)\x1b[0m"
             if selected.accepted:
-                await status(f"\x1b[32m✓ saved\x1b[0m {tail}", store=True)
+                await status(f"\x1b[32m? saved\x1b[0m {tail}", store=True)
             else:
-                await status(f"\x1b[33m✓ saved for review\x1b[0m {tail}", store=True)
+                await status(f"\x1b[33m? saved for review\x1b[0m {tail}", store=True)
             return await finish(TrackOutcome(
                 track, result,
                 "verified match" if selected.accepted else review_reason,
@@ -789,10 +809,10 @@ class JobManager:
                 failed_attempts=tuple(attempts),
             ))
         except FileNotFoundError as exc:
-            await status(f"\x1b[31m✗ {exc}\x1b[0m", store=True)
+            await status(f"\x1b[31m? {exc}\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "download_failed", str(exc), []))
         except Exception as exc:  # noqa: BLE001
-            await status(f"\x1b[31m✗ {exc}\x1b[0m", store=True)
+            await status(f"\x1b[31m? {exc}\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "download_failed", str(exc), []))
 
     @staticmethod

@@ -1,9 +1,10 @@
-﻿import tempfile
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from app.jobs import Job, JobManager
+from app.library import LibraryIndex, LibraryTrack
 from app.matching import Candidate, MatchDecision
 from app.review_report import TrackOutcome
 from app.spotify_resolver import Resolved, Track
@@ -86,6 +87,43 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("download_failed", result.status)
         run.assert_not_awaited()  # never even attempted
 
+    async def test_existing_cross_format_track_is_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = JobManager()
+            existing_path = Path(temp_dir) / "archive" / "Nova - Midnight Run.mp3"
+            existing = LibraryTrack(
+                path=existing_path,
+                relative_path="archive/Nova - Midnight Run.mp3",
+                title="Midnight Run",
+                artist="Nova",
+                album="Night Drive",
+                duration=180,
+                bitrate=192_000,
+                sample_rate=44_100,
+                channels=2,
+                codec="mp3",
+                size=4_000_000,
+                has_artwork=True,
+                issues=(),
+            )
+            settings = {
+                "output_dir": temp_dir,
+                "skip_existing": True,
+                "audio_format": "opus",
+                "_library_index": LibraryIndex([existing]),
+            }
+            job = Job("spotify:test", "spotify", None, "", settings=settings)
+
+            with patch(
+                "app.jobs.candidate_search.search_all",
+                side_effect=AssertionError("source search should not run for an existing track"),
+            ):
+                result = await manager._fetch_track(
+                    job, Track("Nova", "Midnight Run", 180), settings, False, 1, 1,
+                )
+
+        self.assertEqual("skipped", result.status)
+        self.assertIn("archive/Nova - Midnight Run.mp3", result.reason)
     async def test_transient_failure_is_recovered_by_retry_sweep(self):
         """A track that fails to download during the burst is retried after it and saved."""
         with tempfile.TemporaryDirectory() as temp_dir:

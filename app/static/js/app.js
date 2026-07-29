@@ -11,6 +11,7 @@ const state = {
   mediaType: "audio",        // "audio" | "video" (per-download choice)
   lastAudioFormat: null,     // remembered selection when toggling back to audio
   lastVideoQuality: null,    // remembered selection when toggling back to video
+  libraryReport: null,
 };
 
 const ENGINE_LABEL = { spotify: "Spotify", youtube: "YouTube", soundcloud: "SoundCloud" };
@@ -563,6 +564,188 @@ async function saveSettings() {
 function openSettings() { loadSettingsForm(); $("#settings-modal").classList.remove("hidden"); }
 function closeSettings() { $("#settings-modal").classList.add("hidden"); }
 
+/* ---------------- music library ---------------- */
+const ISSUE_LABELS = {
+  unreadable: "Unreadable",
+  missing_title: "Missing title",
+  missing_artist: "Missing artist",
+  missing_album: "Missing album",
+  missing_artwork: "Missing artwork",
+  low_bitrate: "Low bitrate",
+};
+
+function libraryNode(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = String(text);
+  return node;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (!bytes) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const amount = bytes / (1024 ** index);
+  return `${amount.toFixed(index === 0 || amount >= 10 ? 0 : 1)} ${units[index]}`;
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+function qualityLabel(track) {
+  const parts = [(track.codec || "unknown").toUpperCase()];
+  if (track.bitrate) parts.push(`${Math.round(track.bitrate / 1000)} kbps`);
+  if (track.sample_rate) parts.push(`${(track.sample_rate / 1000).toFixed(1)} kHz`);
+  parts.push(formatDuration(track.duration));
+  parts.push(formatBytes(track.size));
+  return parts.join(" / ");
+}
+
+function libraryMatches(item, term) {
+  if (!term) return true;
+  const files = item.files || [];
+  const values = [
+    item.artist, item.title, item.display_artist, item.display_title, item.path,
+    ...files.flatMap((file) => [
+      file.artist, file.title, file.display_artist, file.display_title, file.path,
+    ]),
+  ];
+  return values.some((value) => String(value || "").toLowerCase().includes(term));
+}
+
+function renderLibrarySummary(summary) {
+  const host = $("#library-summary");
+  const stats = [
+    ["Tracks", summary.total_files],
+    ["Library size", formatBytes(summary.total_size)],
+    ["Need attention", summary.files_with_issues],
+    ["Safe repairs", summary.repairable_files],
+    ["Duplicate groups", summary.duplicate_groups],
+    ["Potential savings", formatBytes(summary.reclaimable_size)],
+  ];
+  host.replaceChildren(...stats.map(([label, value]) => {
+    const card = libraryNode("div", "library-stat");
+    card.append(libraryNode("strong", "", value), libraryNode("span", "", label));
+    return card;
+  }));
+  host.classList.remove("hidden");
+}
+
+function duplicateCard(group) {
+  const card = libraryNode("article", "library-card duplicate-card");
+  const head = libraryNode("div", "library-card-head");
+  const identity = libraryNode("div", "library-identity");
+  identity.append(
+    libraryNode("strong", "", group.title || "Unknown title"),
+    libraryNode("span", "", group.artist || "Unknown artist"),
+  );
+  head.append(identity, libraryNode("span", "library-saving", `${formatBytes(group.reclaimable_size)} duplicated`));
+  card.append(head);
+
+  const files = libraryNode("div", "duplicate-files");
+  for (const file of group.files || []) {
+    const row = libraryNode("div", `duplicate-file${file.recommended ? " recommended" : ""}`);
+    const details = libraryNode("div", "duplicate-file-main");
+    const title = libraryNode("div", "library-path", file.path);
+    if (file.recommended) title.append(libraryNode("span", "recommended-badge", "Best copy"));
+    details.append(title, libraryNode("span", "library-quality", qualityLabel(file)));
+    row.append(details, libraryNode("span", "quality-score", `${file.quality_score}/100`));
+    files.append(row);
+  }
+  card.append(files);
+  return card;
+}
+
+function issueCard(track) {
+  const card = libraryNode("article", "library-card issue-card");
+  const head = libraryNode("div", "library-card-head");
+  const identity = libraryNode("div", "library-identity");
+  identity.append(
+    libraryNode("strong", "", track.display_title || "Unknown title"),
+    libraryNode("span", "", track.display_artist || "Unknown artist"),
+  );
+  head.append(identity, libraryNode("span", "quality-score", `${track.quality_score}/100`));
+  card.append(head, libraryNode("div", "library-path", track.path));
+
+  const footer = libraryNode("div", "library-card-footer");
+  const issues = libraryNode("div", "issue-badges");
+  for (const issue of track.issues || []) {
+    issues.append(libraryNode("span", `issue-badge issue-${issue}`, ISSUE_LABELS[issue] || issue));
+  }
+  footer.append(issues);
+  if (track.repairable) {
+    const repair = libraryNode("button", "ghost library-repair", "Fill artist/title");
+    repair.onclick = async () => {
+      repair.disabled = true;
+      repair.textContent = "Repairing...";
+      const result = await api("/api/library/repair", "POST", { path: track.path });
+      if (result.error || result.detail) {
+        toast(result.error || result.detail, "error");
+        repair.disabled = false;
+        repair.textContent = "Fill artist/title";
+        return;
+      }
+      const changed = (result.changed || []).join(" and ");
+      toast(changed ? `Updated ${changed}` : "Tags were already complete", "success");
+      await scanLibrary();
+    };
+    footer.append(repair);
+  }
+  card.append(footer, libraryNode("div", "library-quality", qualityLabel(track)));
+  return card;
+}
+
+function renderLibrary() {
+  const report = state.libraryReport;
+  if (!report) return;
+  const term = $("#library-search").value.trim().toLowerCase();
+  const duplicates = (report.duplicate_groups || []).filter((item) => libraryMatches(item, term));
+  const issues = (report.tracks || []).filter(
+    (item) => (item.issues || []).length && libraryMatches(item, term),
+  );
+
+  $("#library-duplicates").replaceChildren(...duplicates.map(duplicateCard));
+  $("#library-issues").replaceChildren(...issues.map(issueCard));
+  $("#library-duplicate-count").textContent = String(duplicates.length);
+  $("#library-issue-count").textContent = String(issues.length);
+  $("#library-duplicates-section").classList.toggle("hidden", duplicates.length === 0);
+  $("#library-issues-section").classList.toggle("hidden", issues.length === 0);
+  $("#library-empty").classList.toggle("hidden", duplicates.length > 0 || issues.length > 0);
+}
+
+async function scanLibrary() {
+  const button = $("#scan-library");
+  button.disabled = true;
+  button.textContent = "Scanning...";
+  $("#library-status").textContent = "Reading audio files and metadata...";
+  try {
+    const report = await api("/api/library/scan", "POST");
+    if (report.error || report.detail) throw new Error(report.error || report.detail);
+    state.libraryReport = report;
+    renderLibrarySummary(report.summary);
+    renderLibrary();
+    $("#library-status").textContent = `Scanned ${report.root}`;
+    toast(`Library scan complete: ${report.summary.total_files} tracks`, "success");
+  } catch (error) {
+    $("#library-status").textContent = error.message || "Library scan failed.";
+    toast(error.message || "Library scan failed", "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "Scan again";
+  }
+}
+
+function openLibrary() {
+  $("#library-modal").classList.remove("hidden");
+  if (!state.libraryReport) scanLibrary();
+}
+
+function closeLibrary() {
+  $("#library-modal").classList.add("hidden");
+}
 /* ---------------- theme ---------------- */
 function applyTheme(theme) {
   const light = theme === "light";
@@ -592,8 +775,14 @@ function bind() {
   $("#open-settings").onclick = openSettings;
   $("#close-settings").onclick = closeSettings;
   $("#save-settings").onclick = saveSettings;
+  $("#close-library").onclick = closeLibrary;
+  $("#scan-library").onclick = scanLibrary;
+  $("#library-search").addEventListener("input", renderLibrary);
   $("#theme-toggle").onclick = toggleTheme;
   if (state.meta.local) {
+    const libraryButton = $("#open-library");
+    libraryButton.hidden = false;
+    libraryButton.onclick = openLibrary;
     const fb = $("#open-folder");
     fb.hidden = false;
     fb.onclick = async () => {
@@ -624,7 +813,13 @@ function bind() {
     if (n) toast(`Cleared ${n} finished job(s)`, "info");
   };
   $("#settings-modal").addEventListener("click", (e) => { if (e.target.id === "settings-modal") closeSettings(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeSettings(); });
+  $("#library-modal").addEventListener("click", (e) => { if (e.target.id === "library-modal") closeLibrary(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      closeSettings();
+      closeLibrary();
+    }
+  });
 }
 
 async function init() {

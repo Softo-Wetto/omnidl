@@ -1,4 +1,4 @@
-"""OmniDL FastAPI application: routes, static files, and the live WebSocket."""
+﻿"""OmniDL FastAPI application: routes, static files, and the live WebSocket."""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from . import engines, sessions, settings as settings_mod
+from . import engines, library, sessions, settings as settings_mod
 from .jobs import JobManager
 
 # Per-session UI preferences (in-memory). Visitors only ever change these — never the
@@ -172,6 +172,34 @@ async def meta():
         "local": settings_mod.LOCAL_MODE,
     }
 
+
+@app.post("/api/library/scan")
+async def library_scan():
+    """Inspect the configured local output directory without changing any files."""
+    if not settings_mod.LOCAL_MODE:
+        return JSONResponse({"error": "library management is available in local mode only"}, status_code=403)
+    root = Path(settings_mod.load_settings()["output_dir"])
+    try:
+        return await asyncio.to_thread(library.scan_library, root)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/library/repair")
+async def library_repair(payload: dict):
+    """Apply an explicitly requested safe missing-tag repair to one local audio file."""
+    if not settings_mod.LOCAL_MODE:
+        return JSONResponse({"error": "library management is available in local mode only"}, status_code=403)
+    relative_path = payload.get("path")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    root = Path(settings_mod.load_settings()["output_dir"])
+    try:
+        return await asyncio.to_thread(library.repair_missing_tags, root, relative_path.strip())
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 @app.post("/api/download")
 async def download(request: Request, payload: dict):

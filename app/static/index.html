@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -13,20 +13,48 @@
 
   <header class="topbar">
     <div class="brand">
-      <a class="logo" href="/" title="Home" style="text-decoration:none">◐</a>
+      <a class="logo" href="/" title="Home" aria-label="OmniDL home">◐</a>
       <span class="brand-name">Omni<span class="accent">DL</span></span>
       <span class="tagline">spotDL · yt-dlp · scdl — one terminal</span>
     </div>
-    <div class="topbar-actions">
-      <a href="/" class="ghost home-btn" title="Back to homepage"><span class="home-ico">⌂</span> Home</a>
-      <span id="conn" class="conn off" title="Connection status"><i></i>offline</span>
-      <button id="theme-toggle" class="ghost icon-only" title="Toggle light / dark theme">☀</button>
-      <button id="open-folder" class="ghost" title="Open download folder" hidden>
-        <span class="ico">📂</span> Folder
-      </button>
-      <button id="open-settings" class="ghost" title="Settings">
-        <span class="ico">⚙</span> Settings
-      </button>
+
+    <div class="header-controls">
+      <nav class="header-nav" aria-label="Dashboard navigation">
+        <a href="/" class="header-action" aria-label="Home">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m3 10 9-7 9 7"></path>
+            <path d="M5 9.5V20h14V9.5"></path>
+            <path d="M9 20v-6h6v6"></path>
+          </svg>
+          <span class="nav-label">Home</span>
+        </a>
+        <button id="open-library" class="header-action" title="Scan and review your music library" aria-label="Music library" hidden>
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M9 18V5l10-2v13"></path>
+            <circle cx="6" cy="18" r="3"></circle>
+            <circle cx="16" cy="16" r="3"></circle>
+          </svg>
+          <span class="nav-label">Library</span>
+        </button>
+        <button id="open-folder" class="header-action" title="Open download folder" aria-label="Open output folder" hidden>
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2.5h6.5A2.5 2.5 0 0 1 21 10v7.5A2.5 2.5 0 0 1 18.5 20h-13A2.5 2.5 0 0 1 3 17.5Z"></path>
+          </svg>
+          <span class="nav-label">Folder</span>
+        </button>
+        <button id="open-settings" class="header-action" title="Settings" aria-label="Settings">
+          <svg class="nav-icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.04 1.56V20.3h-3v-.08a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7 15a1.7 1.7 0 0 0-1.56-1.04h-.08v-3h.08A1.7 1.7 0 0 0 7 9.92a1.7 1.7 0 0 0-.34-1.88L6.6 7.98 8.72 5.86l.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1.04-1.56V4.6h3v.08a1.7 1.7 0 0 0 1.04 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.04h.08v3h-.08A1.7 1.7 0 0 0 19.4 15Z"></path>
+          </svg>
+          <span class="nav-label">Settings</span>
+        </button>
+      </nav>
+
+      <div class="header-utilities">
+        <span id="conn" class="conn off" title="Connection status"><i></i>offline</span>
+        <button id="theme-toggle" class="header-icon" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">☀</button>
+      </div>
     </div>
   </header>
 
@@ -157,6 +185,45 @@
     </div>
   </div>
 
+  <!-- Local music library modal -->
+  <div id="library-modal" class="modal hidden">
+    <div class="modal-box library-modal-box">
+      <div class="modal-head">
+        <div>
+          <h2><span class="ico">&#9835;</span> Music library</h2>
+          <p class="library-subtitle">Review metadata, quality and duplicates without deleting or overwriting files.</p>
+        </div>
+        <button id="close-library" class="ghost icon-only">&#10005;</button>
+      </div>
+      <div class="library-toolbar">
+        <input id="library-search" type="text" autocomplete="off" spellcheck="false"
+               placeholder="Filter by artist, title or path..." />
+        <button id="scan-library" class="primary">Scan library</button>
+      </div>
+      <div id="library-status" class="library-status">Scan your configured output folder to begin.</div>
+      <div id="library-summary" class="library-summary hidden"></div>
+      <div class="library-body">
+        <section id="library-duplicates-section" class="library-section hidden">
+          <div class="library-section-head">
+            <div><span class="eyebrow">Quality comparison</span><h3>Possible duplicates</h3></div>
+            <span id="library-duplicate-count" class="chip"></span>
+          </div>
+          <div id="library-duplicates" class="library-list"></div>
+        </section>
+        <section id="library-issues-section" class="library-section hidden">
+          <div class="library-section-head">
+            <div><span class="eyebrow">Metadata health</span><h3>Files needing attention</h3></div>
+            <span id="library-issue-count" class="chip"></span>
+          </div>
+          <div id="library-issues" class="library-list"></div>
+        </section>
+        <div id="library-empty" class="library-empty hidden">
+          <strong>Your library looks clean.</strong>
+          <span>No metadata problems or duplicate groups were found.</span>
+        </div>
+      </div>
+    </div>
+  </div>
   <div id="toasts" class="toasts"></div>
 
   <script src="/static/js/app.js"></script>
