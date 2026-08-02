@@ -218,14 +218,80 @@ section.block { padding: 64px 0; }
 .cta-band p { color: var(--muted); margin: 0 0 24px; }
 
 /* ---------- doc pages (about/privacy/terms) ---------- */
-.doc { padding: 56px 0 40px; max-width: 820px; }
-.doc h1 { font-size: clamp(30px, 5vw, 46px); margin: 0 0 6px; letter-spacing: -.8px; }
-.doc .updated { color: var(--dim); font-size: 13px; margin: 0 0 32px; }
-.doc h2 { font-size: 22px; margin: 34px 0 10px; }
+.doc { padding: 48px 0 40px; max-width: 880px; }
 .doc p, .doc li { color: var(--muted); }
 .doc strong { color: var(--text); }
 .doc a { text-decoration: underline; }
-.doc .callout { border: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--panel); border-radius: 12px; padding: 16px 18px; margin: 22px 0; }
+
+/* page hero */
+.doc-hero { margin-bottom: 12px; }
+.doc-hero .eyebrow {
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 13px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase;
+}
+.doc-hero .eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.doc-hero h1 { font-size: clamp(32px, 6vw, 52px); margin: 18px 0 8px; letter-spacing: -.9px; line-height: 1.04; }
+.doc-hero h1 .grad {
+  background: linear-gradient(120deg, var(--accent), var(--accent-2) 55%, var(--spotify));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.doc-hero .updated { color: var(--dim); font-size: 13px; margin: 0; }
+.doc-hero .lede { color: var(--muted); font-size: 17px; max-width: 660px; margin: 14px 0 0; line-height: 1.6; }
+
+/* sections with a coloured marker */
+.doc-section { margin-top: 36px; }
+.doc-section > h2 { display: flex; align-items: center; gap: 11px; font-size: 21px; margin: 0 0 12px; letter-spacing: -.3px; }
+.doc-section > h2::before {
+  content: ""; width: 6px; height: 22px; border-radius: 3px; flex: none;
+  background: linear-gradient(var(--accent), var(--accent-2));
+}
+
+/* feature/answer cards */
+.doc-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 6px; }
+.doc-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 15px; padding: 18px;
+  border-top: 3px solid var(--c, var(--accent)); transition: transform .15s ease, border-color .15s ease;
+}
+.doc-card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--c, var(--accent)) 55%, var(--border)); }
+.doc-card .ico { font-size: 22px; line-height: 1; }
+.doc-card h3 { margin: 12px 0 6px; font-size: 15px; color: var(--text); }
+.doc-card p { margin: 0; font-size: 13.5px; line-height: 1.55; }
+
+/* status/callout variants */
+.doc .callout {
+  border: 1px solid var(--border); border-left: 4px solid var(--accent);
+  background: var(--panel); border-radius: 13px; padding: 16px 18px; margin: 22px 0; color: var(--muted);
+}
+.doc .callout.good { border-left-color: var(--green); }
+.doc .callout.warn { border-left-color: var(--soundcloud); }
+
+/* itemised lists (privacy "what we process", etc.) */
+.doc-list { list-style: none; padding: 0; margin: 10px 0; display: grid; gap: 10px; }
+.doc-list li {
+  position: relative; padding: 13px 15px 13px 40px; color: var(--muted);
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+}
+.doc-list li::before {
+  content: ""; position: absolute; left: 16px; top: 17px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--accent); box-shadow: 0 0 8px var(--accent);
+}
+
+/* tech pills */
+.doc-tech { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.doc-tech span {
+  font-size: 12.5px; font-weight: 700; color: var(--muted); padding: 6px 12px; border-radius: 999px;
+  background: var(--panel); border: 1px solid var(--border);
+}
+
+/* bottom CTA band */
+.doc-cta {
+  margin-top: 44px; padding: 30px; text-align: center; border: 1px solid var(--border); border-radius: 20px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, var(--panel)), var(--panel) 68%);
+}
+.doc-cta h2 { margin: 0 0 6px; font-size: 23px; }
+.doc-cta p { margin: 0 0 18px; color: var(--muted); }
 
 /* ---------- footer ---------- */
 .site-footer { border-top: 1px solid var(--border-soft); margin-top: 40px; padding: 44px 0 30px; background: var(--bg-2); }

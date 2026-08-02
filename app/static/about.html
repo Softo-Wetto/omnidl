@@ -16,6 +16,7 @@
       <nav class="nav">
         <a class="nav-link" href="/about">About</a>
         <a class="nav-link" href="/privacy">Privacy</a>
+        <a class="nav-link" href="/terms">Terms</a>
         <button id="theme-toggle" class="icon-btn" title="Toggle theme">☀</button>
         <a class="btn primary" href="/dashboard">Launch app ▸</a>
       </nav>
@@ -23,38 +24,52 @@
   </header>
 
   <main class="wrap doc">
-    <h1>About OmniDL</h1>
-    <p class="updated">A unified music &amp; video downloader.</p>
+    <div class="doc-hero">
+      <span class="eyebrow"><span class="dot"></span> About OmniDL</span>
+      <h1>One tool for <span class="grad">your whole library</span></h1>
+      <p class="lede">OmniDL grew out of a simple frustration: the free tools for keeping a personal
+      copy of your music kept breaking. Spotify locked its Web API behind Premium, and the good
+      downloaders were scattered across a dozen command-line scripts. OmniDL pulls it all into one
+      clean dashboard.</p>
+    </div>
 
-    <p>OmniDL grew out of a simple frustration: the free tools that let you keep a personal copy
-    of your music kept breaking. Spotify locked its Web API behind Premium, downloaders scattered
-    across half a dozen command-line scripts, and none of them were pleasant to use. OmniDL pulls
-    it all together into one clean dashboard.</p>
+    <div class="doc-section">
+      <h2>What it does</h2>
+      <p>Paste a Spotify, YouTube or SoundCloud link (or just type a search) and OmniDL finds the
+      best official source, downloads it, and writes proper metadata and cover art onto the file —
+      no Premium and no developer keys required.</p>
+      <div class="doc-cards">
+        <div class="doc-card" style="--c:var(--spotify)"><div class="ico">🎧</div><h3>Spotify without Premium</h3><p>Reads the public playlist page and fetches each track's official audio — no login, no API, no 403s.</p></div>
+        <div class="doc-card" style="--c:var(--accent)"><div class="ico">✨</div><h3>Official-audio matching</h3><p>Matches every track to its studio master by artist, title and length — the clean version, not a random video.</p></div>
+        <div class="doc-card" style="--c:var(--youtube)"><div class="ico">🎬</div><h3>Music or full video</h3><p>One toggle switches between clean audio and the full video — MP4 up to 4K, or MKV.</p></div>
+      </div>
+    </div>
 
-    <h2>What it does</h2>
-    <p>Paste a Spotify, YouTube or SoundCloud link (or just type a search) and OmniDL figures out
-    the best <strong>official-audio</strong> source, downloads it with <strong>yt-dlp</strong>,
-    and writes proper metadata and cover art onto the file. For Spotify it reads the public
-    playlist page and matches each track to its studio master — no Premium and no developer
-    credentials required. Prefer the full video? Flip the <strong>Audio / Video</strong> toggle
-    and OmniDL grabs it as an MP4 (up to 4K) or MKV.</p>
-
-    <h2>How it's built</h2>
-    <p>OmniDL is a <strong>FastAPI</strong> app with a live WebSocket terminal, orchestrating
-    <strong>yt-dlp</strong>, <strong>scdl</strong> and the Spotify resolver. The dashboard does the
-    matching, downloading and tagging for you and streams the progress back live.</p>
+    <div class="doc-section">
+      <h2>How it's built</h2>
+      <p>OmniDL is a <strong>FastAPI</strong> app with a live WebSocket terminal that orchestrates the
+      tools the community trusts. The dashboard handles matching, downloading and tagging for you and
+      streams the progress back in real time.</p>
+      <div class="doc-tech"><span>FastAPI</span><span>yt-dlp</span><span>scdl</span><span>Spotify resolver</span><span>ffmpeg</span><span>mutagen</span></div>
+    </div>
 
     <div class="callout">
       <strong>No friction.</strong> No Premium, no developer keys, and no sign-up — paste a link
       and go. OmniDL is built for personal use; please support the artists you love.
     </div>
 
-    <h2>Fair use</h2>
-    <p>OmniDL is intended for personal use — backing up music you have the right to, and supporting
-    the artists you love. Please respect the terms of the services you use and the rights of
-    content creators. See our <a href="/terms">Terms</a> and <a href="/privacy">Privacy</a> pages.</p>
+    <div class="doc-section">
+      <h2>Fair use</h2>
+      <p>OmniDL is intended for personal use — backing up music you have the right to. Please respect
+      the terms of the services you use and the rights of content creators. See our
+      <a href="/terms">Terms</a> and <a href="/privacy">Privacy</a> pages.</p>
+    </div>
 
-    <p style="margin-top:32px"><a class="btn primary" href="/dashboard">Open the dashboard ▸</a></p>
+    <div class="doc-cta">
+      <h2>Ready to build your library?</h2>
+      <p>It's free and takes seconds to start.</p>
+      <a class="btn primary lg" href="/dashboard">Open the dashboard ▸</a>
+    </div>
   </main>
 
   <footer class="site-footer">

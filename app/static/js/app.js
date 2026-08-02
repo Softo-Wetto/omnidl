@@ -266,10 +266,11 @@ function renderSummary() {
   $("#queue-empty").classList.toggle("hidden", state.order.length > 0);
 }
 
-function makeButton(label, title, handler) {
+function makeButton(label, title, handler, cls) {
   const b = document.createElement("button");
   b.textContent = label;
   if (title) b.title = title;
+  if (cls) b.className = cls;
   b.onclick = (e) => { e.stopPropagation(); handler(); };
   return b;
 }
@@ -308,19 +309,17 @@ function renderQueue() {
     const actions = document.createElement("div");
     actions.className = "job-actions";
     if (job.status === "running" || job.status === "queued") {
-      actions.append(makeButton("Cancel", "Cancel", () => api(`/api/jobs/${id}/cancel`, "POST")));
+      actions.append(makeButton("Cancel", "Cancel", () => api(`/api/jobs/${id}/cancel`, "POST"), "btn-danger"));
     } else {
       if (job.status === "done" && job.has_files) {
-        const save = makeButton("⤓ Save", "Download to this device", () => {
+        actions.append(makeButton("⤓ Save", "Download to this device", () => {
           window.location.href = `/api/jobs/${id}/file`;
-        });
-        save.className = "save-btn";
-        actions.append(save);
+        }, "save-btn"));
       }
       if (job.status === "error" || job.status === "cancelled") {
-        actions.append(makeButton("↻ Retry", "Run again", () => retryJob(job)));
+        actions.append(makeButton("↻ Retry", "Run again", () => retryJob(job), "btn-retry"));
       }
-      actions.append(makeButton("✕", "Remove from history", () => api(`/api/jobs/${id}`, "DELETE")));
+      actions.append(makeButton("✕", "Remove from history", () => api(`/api/jobs/${id}`, "DELETE"), "btn-remove"));
     }
     metaRow.append(tool, actions);
     li.append(top, metaRow);
