@@ -1,0 +1,67 @@
+name: Deploy to VPS
+
+# Push to main -> ship the code to the Hetzner box and restart OmniDL.
+# The SSH key used here is locked to a forced command on the server (it can ONLY run
+# deploy-receive.sh), so a leaked key still can't open a shell on the VPS.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - ".gitignore"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+env:
+  VPS_HOST: 178.105.246.80
+  VPS_USER: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.VPS_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pin the host key so this can't be silently MITM'd.
+          printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Ship code and restart
+        run: |
+          tar \
+            --exclude='./.git' \
+            --exclude='./.github' \
+            --exclude='./dist' \
+            --exclude='./build' \
+            --exclude='./downloads' \
+            --exclude='./__pycache__' \
+            --exclude='*/__pycache__' \
+            --exclude='./.venv' \
+            --exclude='./config.json' \
+            --exclude='./history.json' \
+            --exclude='./cookies.txt' \
+            --exclude='*.pyc' \
+            -czf - . \
+          | ssh -T -i ~/.ssh/deploy_key \
+                -o BatchMode=yes \
+                -o ConnectTimeout=15 \
+                "${VPS_USER}@${VPS_HOST}"
+
+      - name: Verify site is up
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://omnidl.softowetto.com/api/meta || true)
+            if [ "$code" = "200" ]; then echo "OmniDL is up (200)"; exit 0; fi
+            echo "attempt $i: got '$code', retrying..."; sleep 5
+          done
+          echo "Site did not return 200 after deploy"; exit 1

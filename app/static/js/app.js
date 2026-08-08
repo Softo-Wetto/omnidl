@@ -412,7 +412,10 @@ function setConn(online) {
   c.innerHTML = "<i></i>" + (online ? "online" : "offline");
 }
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  // Must match the page scheme: a ws:// socket on an https:// page is blocked as mixed
+  // content, which would leave the dashboard permanently "offline" with no live output.
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${scheme}//${location.host}/ws`);
   ws.onopen = () => setConn(true);
   ws.onclose = () => { setConn(false); setTimeout(connect, 1500); };
   ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
@@ -479,7 +482,15 @@ function handleMessage(msg) {
 
 function notifyFinished(job) {
   const short = job.input.length > 48 ? job.input.slice(0, 48) + "…" : job.input;
-  if (job.status === "done") toast(`✓ Finished: ${short}`, "success");
+  if (job.status === "done") {
+    // Hosted mode delivers the file through the browser, so the job isn't really "done"
+    // for the user until they hit Save — say so, and note that it won't wait forever.
+    if (!state.meta.local && job.has_files) {
+      toast(`✓ Ready: ${short} — click ⤓ Save to download it`, "success", 7000);
+    } else {
+      toast(`✓ Finished: ${short}`, "success");
+    }
+  }
   else if (job.status === "error") toast(`✕ Failed: ${short}`, "error");
   else if (job.status === "cancelled") toast(`Cancelled: ${short}`, "info");
 }
@@ -499,6 +510,9 @@ async function submitDownload() {
   const input = $("#input").value.trim();
   if (!input) return;
   const job = await api("/api/download", "POST", downloadPayload(input, $("#engine").value));
+  // Server rejections (rate limits, bad input) must be surfaced — otherwise the box just
+  // clears and it looks like the download silently vanished.
+  if (job && job.error) { toast(job.error, "error", 6000); return; }
   if (job && job.engine_label) toast(`Queued · ${job.engine_label}`, "info");
   $("#input").value = "";
   updateChip();
@@ -788,6 +802,10 @@ function bind() {
       const r = await api("/api/open-folder", "POST");
       if (r && r.error) toast(r.error, "error");
     };
+  } else {
+    // Hosted: there's no server folder to open, so explain how files reach the visitor.
+    const hint = $("#hosted-hint");
+    if (hint) hint.hidden = false;
   }
   $("#clear-term").onclick = () => termClear(true);
   $("#jump-latest").onclick = () => logView.jump();
