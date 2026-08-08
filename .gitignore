@@ -10,3 +10,5 @@ venv/
 cookies.txt
 build/
 dist/
+*.env
+.env.local

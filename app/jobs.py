@@ -30,6 +30,12 @@ _MAX_ACTIVE_PER_SESSION = 3          # queued + running at once
 _RATE_MAX = 40                       # submissions ...
 _RATE_WINDOW = 3600                  # ... per hour, per session
 
+# Per-IP limits. Session limits alone are trivially bypassed by clearing cookies, so the
+# real abuse ceiling is per address. Set higher than the session cap so shared/NAT networks
+# (offices, dorms, mobile carriers) still work normally.
+_MAX_ACTIVE_PER_IP = 6
+_RATE_IP_MAX = 80
+
 # YouTube's "Video unavailable" under load is usually transient, so re-try the SAME
 # candidate a couple of times (with backoff) before giving up on it — this stops a momentary
 # hiccup on the correct match from cascading into a wrong-song fallback.
@@ -163,7 +169,7 @@ class ToolOutputFormatter:
 class Job:
     def __init__(self, input_text: str, engine: str, argv: list[str] | None,
                  display_cmd: str, *, spotify_url: str | None = None,
-                 settings: dict | None = None, session: str = ""):
+                 settings: dict | None = None, session: str = "", ip: str = ""):
         self.id = uuid.uuid4().hex[:12]
         self.input = input_text
         self.engine = engine
@@ -172,6 +178,7 @@ class Job:
         self.spotify_url = spotify_url
         self.settings = settings or {}
         self.session = session           # owning visitor; scopes visibility + files
+        self.ip = ip                     # client address, for per-IP abuse limits
         self.out_dir: Path | None = None  # per-job download folder
         self.status = "queued"  # queued | running | done | error | cancelled
         self.code: int | None = None
@@ -265,6 +272,7 @@ class JobManager:
         self._worker_tasks: list[asyncio.Task] = []
         self._cleanup_task: asyncio.Task | None = None
         self._submit_times: dict[str, list[float]] = {}  # session -> recent submit times
+        self._ip_times: dict[str, list[float]] = {}      # client IP -> recent submit times
 
     # ----- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -332,27 +340,47 @@ class JobManager:
         return sum(1 for j in self.jobs.values()
                    if j.session == session and j.status in ("queued", "running"))
 
-    def check_limit(self, session: str) -> str | None:
-        """Return an error message if this session may not submit right now, else None."""
+    def _active_count_ip(self, ip: str) -> int:
+        return sum(1 for j in self.jobs.values()
+                   if j.ip == ip and j.status in ("queued", "running"))
+
+    @staticmethod
+    def _recent(times: list[float], now: float) -> list[float]:
+        return [t for t in times if now - t < _RATE_WINDOW]
+
+    def check_limit(self, session: str, ip: str = "") -> str | None:
+        """Return an error message if this caller may not submit right now, else None.
+
+        Enforced per session *and* per IP — a visitor who clears cookies gets a fresh
+        session but still counts against their address.
+        """
+        now = time.time()
         if self._active_count(session) >= _MAX_ACTIVE_PER_SESSION:
             return f"Too many active downloads (max {_MAX_ACTIVE_PER_SESSION}). Let one finish first."
-        now = time.time()
-        recent = [t for t in self._submit_times.get(session, []) if now - t < _RATE_WINDOW]
+        recent = self._recent(self._submit_times.get(session, []), now)
         self._submit_times[session] = recent
         if len(recent) >= _RATE_MAX:
             return "Hourly download limit reached for this session. Please try again later."
+
+        if ip:
+            if self._active_count_ip(ip) >= _MAX_ACTIVE_PER_IP:
+                return f"Too many active downloads from your network (max {_MAX_ACTIVE_PER_IP})."
+            ip_recent = self._recent(self._ip_times.get(ip, []), now)
+            self._ip_times[ip] = ip_recent
+            if len(ip_recent) >= _RATE_IP_MAX:
+                return "Hourly download limit reached for your network. Please try again later."
         return None
 
     # ----- submission ----------------------------------------------------
     async def submit(self, input_text: str, settings_dict: dict, session: str,
-                     engine_override: str | None = None) -> Job:
+                     engine_override: str | None = None, ip: str = "") -> Job:
         s = dict(settings_dict)
         if engine_override in engines.ENGINES:
             engine = engine_override
         else:
             engine = engines.detect_engine(input_text, s)
 
-        job = Job(input_text, engine, None, "", session=session, settings=s)
+        job = Job(input_text, engine, None, "", session=session, settings=s, ip=ip)
         if settings_mod.LOCAL_MODE:
             # Personal mode: write straight to the user's configured folder. out_dir stays
             # None so nothing here is ever auto-deleted (it's the user's library).
@@ -382,7 +410,10 @@ class JobManager:
 
         self.jobs[job.id] = job
         self.order.append(job.id)
-        self._submit_times.setdefault(session, []).append(time.time())
+        now = time.time()
+        self._submit_times.setdefault(session, []).append(now)
+        if ip:
+            self._ip_times.setdefault(ip, []).append(now)
         self.queue.put_nowait(job.id)
         await self._send(job, {"type": "job_added", "job": job.to_dict()})
         self._persist()

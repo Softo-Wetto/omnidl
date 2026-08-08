@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -100,8 +100,28 @@ def _sid(request: Request) -> str:
     return getattr(request.state, "sid", "") or sessions.new_sid()
 
 
+def _client_ip(request: Request) -> str:
+    """Real client address, for per-IP abuse limits.
+
+    Behind a reverse proxy (Caddy) the socket peer is always 127.0.0.1. Caddy *appends* the
+    true peer to X-Forwarded-For, so the right-most entry is the one it observed — take that
+    rather than the left-most, which a client can forge.
+    """
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[-1].strip()
+    return request.client.host if request.client else ""
+
+
 def _page(name: str) -> FileResponse:
     return FileResponse(str(STATIC_DIR / name), headers=_NO_CACHE)
+
+
+@app.get("/robots.txt")
+async def robots():
+    """Keep the downloader out of search indexes — it's a personal tool, not something that
+    benefits from search traffic, and being indexed invites abuse and rights-holder attention."""
+    return PlainTextResponse("User-agent: *\nDisallow: /\n", headers=_NO_CACHE)
 
 
 @app.get("/favicon.ico")
@@ -207,7 +227,8 @@ async def download(request: Request, payload: dict):
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
     sid = _sid(request)
-    limit = manager.check_limit(sid)
+    ip = _client_ip(request)
+    limit = manager.check_limit(sid, ip)
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
     s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
@@ -218,7 +239,7 @@ async def download(request: Request, payload: dict):
     if payload.get("video_quality"):
         s["video_quality"] = payload["video_quality"]
     override = payload.get("engine_override") or None
-    job = await manager.submit(text, s, sid, override)
+    job = await manager.submit(text, s, sid, override, ip=ip)
     return job.to_dict()
 
 
