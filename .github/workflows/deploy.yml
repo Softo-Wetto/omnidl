@@ -33,7 +33,15 @@ jobs:
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.VPS_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          # Accept the key either as raw PEM or as one-line base64. Base64 is preferred:
+          # a multi-line PEM is easily mangled when pasted into the secrets UI, which is
+          # exactly how the first attempt failed.
+          raw='${{ secrets.VPS_DEPLOY_KEY }}'
+          if printf '%s' "$raw" | grep -q 'BEGIN OPENSSH PRIVATE KEY'; then
+            printf '%s\n' "$raw" > ~/.ssh/deploy_key
+          else
+            printf '%s' "$raw" | tr -d ' \n\r\t' | base64 -d > ~/.ssh/deploy_key 2>/dev/null || true
+          fi
           chmod 600 ~/.ssh/deploy_key
           printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
