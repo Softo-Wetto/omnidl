@@ -228,6 +228,32 @@
       </div>
     </div>
   </div>
+  <!-- Access gate: only shown when the server has a passphrase configured -->
+  <div id="unlock-modal" class="modal hidden">
+    <div class="modal-box" style="max-width:440px">
+      <div class="modal-head">
+        <h2><span class="ico">🔑</span> Unlock YouTube &amp; Spotify</h2>
+        <button id="close-unlock" class="ghost icon-only">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-note">
+          <strong>SoundCloud and direct media links work without this.</strong>
+          YouTube and Spotify downloads use the operator's YouTube account, so they need the
+          access passphrase.
+        </div>
+        <label>Access passphrase
+          <input id="unlock-input" type="password" autocomplete="current-password"
+                 placeholder="Enter passphrase" />
+        </label>
+        <p id="unlock-error" class="hint" style="color:var(--red);min-height:16px"></p>
+      </div>
+      <div class="modal-foot">
+        <span class="status-msg"></span>
+        <button id="do-unlock" class="primary">Unlock</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toasts" class="toasts"></div>
 
   <script src="/static/js/app.js"></script>

@@ -100,6 +100,13 @@ def _sid(request: Request) -> str:
     return getattr(request.state, "sid", "") or sessions.new_sid()
 
 
+def _unlocked(request: Request) -> bool:
+    """Has this visitor passed the access gate? (Always true when no gate is configured.)"""
+    if not settings_mod.gate_enabled():
+        return True
+    return sessions.unlock_valid(_sid(request), request.cookies.get(sessions.UNLOCK_COOKIE))
+
+
 def _client_ip(request: Request) -> str:
     """Real client address, for per-IP abuse limits.
 
@@ -182,7 +189,7 @@ async def post_settings(request: Request, payload: dict):
 
 
 @app.get("/api/meta")
-async def meta():
+async def meta(request: Request):
     """Static info the frontend needs to build its forms."""
     return {
         "engines": engines.ENGINES,
@@ -190,7 +197,56 @@ async def meta():
         "video_qualities": settings_mod.VIDEO_QUALITIES,
         "video_containers": settings_mod.VIDEO_CONTAINERS,
         "local": settings_mod.LOCAL_MODE,
+        # Access gate: `gated` tells the UI to expect locked sources at all; `unlocked` is
+        # this visitor's current state.
+        "gated": settings_mod.gate_enabled(),
+        "unlocked": _unlocked(request),
     }
+
+
+# Failed unlock attempts per IP, to blunt passphrase guessing.
+_UNLOCK_FAILS: dict[str, list[float]] = {}
+_UNLOCK_MAX_FAILS = 8
+_UNLOCK_WINDOW = 900          # 15 minutes
+
+
+@app.post("/api/unlock")
+async def unlock(request: Request, payload: dict):
+    """Exchange the access passphrase for a signed unlock cookie."""
+    import hmac as _hmac
+    import time as _time
+
+    if not settings_mod.gate_enabled():
+        return {"ok": True, "unlocked": True}
+
+    ip = _client_ip(request)
+    now = _time.time()
+    recent = [t for t in _UNLOCK_FAILS.get(ip, []) if now - t < _UNLOCK_WINDOW]
+    _UNLOCK_FAILS[ip] = recent
+    if len(recent) >= _UNLOCK_MAX_FAILS:
+        return JSONResponse(
+            {"error": "Too many incorrect attempts. Try again in 15 minutes."},
+            status_code=429,
+        )
+
+    supplied = (payload.get("passphrase") or "").strip()
+    # Constant-time compare so timing can't leak the passphrase.
+    if not _hmac.compare_digest(supplied, settings_mod.ACCESS_PASSPHRASE):
+        _UNLOCK_FAILS.setdefault(ip, []).append(now)
+        left = _UNLOCK_MAX_FAILS - len(_UNLOCK_FAILS[ip])
+        return JSONResponse(
+            {"error": f"Incorrect passphrase. {left} attempt(s) left."}, status_code=403
+        )
+
+    sid = _sid(request)
+    _UNLOCK_FAILS.pop(ip, None)
+    response = JSONResponse({"ok": True, "unlocked": True})
+    response.set_cookie(
+        sessions.UNLOCK_COOKIE, sessions.unlock_token(sid),
+        max_age=sessions.COOKIE_MAX_AGE, httponly=True, samesite="lax",
+        secure=sessions.COOKIE_SECURE,
+    )
+    return response
 
 
 @app.post("/api/library/scan")
@@ -226,6 +282,19 @@ async def download(request: Request, payload: dict):
     text = (payload.get("input") or "").strip()
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
+    # YouTube-backed downloads spend the operator's cookies, so they're gated when a
+    # passphrase is configured. Everything cookie-free (SoundCloud, direct links, other
+    # yt-dlp sites) stays open to anyone.
+    if engines.needs_youtube_account(text) and not _unlocked(request):
+        return JSONResponse(
+            {
+                "error": "YouTube and Spotify downloads need the access passphrase. "
+                         "SoundCloud links and direct media links work without it.",
+                "needs_unlock": True,
+            },
+            status_code=403,
+        )
+
     sid = _sid(request)
     ip = _client_ip(request)
     limit = manager.check_limit(sid, ip)

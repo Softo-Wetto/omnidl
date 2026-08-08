@@ -8,6 +8,7 @@ const state = {
   jobs: new Map(),
   order: [],
   viewingId: null,
+  pendingInput: null,        // input held back by the access gate, retried after unlock
   mediaType: "audio",        // "audio" | "video" (per-download choice)
   lastAudioFormat: null,     // remembered selection when toggling back to audio
   lastVideoQuality: null,    // remembered selection when toggling back to video
@@ -222,7 +223,13 @@ function updateChip() {
   let tool = engine === "spotify" ? "embed → yt-dlp" : ENGINE_TOOL[engine];
   if (wantsVideo) tool += " · video";
   chip.textContent = `${ENGINE_LABEL[engine]} · ${tool}`;
-  if (wantsVideo) {
+  if (gateBlocks(text)) {
+    hint.innerHTML = '🔒 YouTube &amp; Spotify need the access passphrase — ' +
+                     '<a href="#" id="hint-unlock" style="color:var(--accent)">unlock</a>. ' +
+                     'SoundCloud &amp; direct links work without it.';
+    const a = $("#hint-unlock");
+    if (a) a.onclick = (e) => { e.preventDefault(); state.pendingInput = text.trim(); openUnlock(); };
+  } else if (wantsVideo) {
     hint.textContent = `Full video → ${$("#format").value} (${state.settings.video_container || "mp4"}).`;
   } else if (engine === "spotify") {
     hint.textContent = "Via public embed — no Spotify API, no Premium, no login needed.";
@@ -506,12 +513,53 @@ async function api(path, method = "GET", body) {
   return res.json().catch(() => ({}));
 }
 
+/* ---------------- access gate (hosted, YouTube/Spotify only) ---------------- */
+// Mirrors engines.needs_youtube_account() so the UI can warn before submitting.
+function needsUnlock(text) {
+  const t = (text || "").trim().toLowerCase();
+  if (!t) return false;
+  if (t.includes("youtube.com") || t.includes("youtu.be")) return true;
+  if (t.includes("open.spotify.com") || t.startsWith("spotify:")) return true;
+  if (t.includes("soundcloud.com")) return false;
+  return !/^https?:\/\//.test(t);          // bare search -> YouTube search
+}
+
+function gateBlocks(text) {
+  return state.meta.gated && !state.meta.unlocked && needsUnlock(text);
+}
+
+function openUnlock() {
+  $("#unlock-error").textContent = "";
+  $("#unlock-input").value = "";
+  $("#unlock-modal").classList.remove("hidden");
+  $("#unlock-input").focus();
+}
+function closeUnlock() { $("#unlock-modal").classList.add("hidden"); }
+
+async function doUnlock() {
+  const pass = $("#unlock-input").value;
+  if (!pass) return;
+  const r = await api("/api/unlock", "POST", { passphrase: pass });
+  if (r && r.ok) {
+    state.meta.unlocked = true;
+    closeUnlock();
+    toast("Unlocked — YouTube & Spotify enabled", "success");
+    updateChip();
+    if (state.pendingInput) { $("#input").value = state.pendingInput; state.pendingInput = null; submitDownload(); }
+  } else {
+    $("#unlock-error").textContent = (r && r.error) || "Unlock failed.";
+  }
+}
+
 async function submitDownload() {
   const input = $("#input").value.trim();
   if (!input) return;
+  // Prompt before spending a request we know will be refused.
+  if (gateBlocks(input)) { state.pendingInput = input; openUnlock(); return; }
   const job = await api("/api/download", "POST", downloadPayload(input, $("#engine").value));
   // Server rejections (rate limits, bad input) must be surfaced — otherwise the box just
   // clears and it looks like the download silently vanished.
+  if (job && job.needs_unlock) { state.pendingInput = input; openUnlock(); return; }
   if (job && job.error) { toast(job.error, "error", 6000); return; }
   if (job && job.engine_label) toast(`Queued · ${job.engine_label}`, "info");
   $("#input").value = "";
@@ -829,11 +877,16 @@ function bind() {
     }
     if (n) toast(`Cleared ${n} finished job(s)`, "info");
   };
+  $("#do-unlock").onclick = doUnlock;
+  $("#close-unlock").onclick = closeUnlock;
+  $("#unlock-input").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
+  $("#unlock-modal").addEventListener("click", (e) => { if (e.target.id === "unlock-modal") closeUnlock(); });
   $("#settings-modal").addEventListener("click", (e) => { if (e.target.id === "settings-modal") closeSettings(); });
   $("#library-modal").addEventListener("click", (e) => { if (e.target.id === "library-modal") closeLibrary(); });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       closeSettings();
+      closeUnlock();
       closeLibrary();
     }
   });

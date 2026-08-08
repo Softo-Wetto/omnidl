@@ -36,6 +36,23 @@ def sign(sid: str) -> str:
     return f"{sid}.{_mac(sid)}"
 
 
+UNLOCK_COOKIE = "omnidl_unlock"
+
+
+def unlock_token(sid: str) -> str:
+    """Proof that this session passed the access gate.
+
+    Kept in its own signed cookie rather than server memory so an unlocked visitor stays
+    unlocked across restarts and deploys. Bound to the session id, so it can't be lifted
+    from one browser and replayed in another.
+    """
+    return hmac.new(_SECRET, f"unlock:{sid}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def unlock_valid(sid: str, cookie_value: str | None) -> bool:
+    return bool(cookie_value) and hmac.compare_digest(cookie_value, unlock_token(sid))
+
+
 def read_valid_sid(cookie_value: str | None) -> str | None:
     """Return the session id from a cookie value if its signature checks out, else None."""
     if not cookie_value or "." not in cookie_value:

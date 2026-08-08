@@ -39,6 +39,30 @@ def detect_engine(text: str, settings: dict) -> str:
     return "youtube"
 
 
+_YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "music.youtube.com")
+
+
+def needs_youtube_account(text: str) -> bool:
+    """True if this input will be fetched from YouTube, and so consumes the operator's cookies.
+
+    Deliberately keyed on the *input*, not the engine: the "youtube" engine is really yt-dlp,
+    which also handles direct file links and ~1000 other sites that work fine without cookies.
+    Gating the engine would lock those out for no reason.
+
+    Gated:   youtube.com / youtu.be links, Spotify (resolved via YouTube audio), and plain-text
+             searches (they run as a YouTube search).
+    Ungated: SoundCloud, direct media links, and any other site yt-dlp supports.
+    """
+    t = text.strip().lower()
+    if any(h in t for h in _YOUTUBE_HOSTS):
+        return True
+    if "open.spotify.com" in t or t.startswith("spotify:"):
+        return True
+    if "soundcloud.com" in t:
+        return False
+    return not is_url(t)          # bare search text -> ytsearch
+
+
 FROZEN = getattr(sys, "frozen", False)
 
 

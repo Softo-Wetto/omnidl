@@ -41,6 +41,19 @@ def _env_bool(name: str, default: bool) -> bool:
 _HOST_IS_LOCAL = os.environ.get("OMNIDL_HOST", "127.0.0.1") in ("127.0.0.1", "localhost", "")
 LOCAL_MODE = _env_bool("OMNIDL_LOCAL", default=_HOST_IS_LOCAL)
 
+# Access gate. YouTube bot-walls datacenter IPs, so those downloads need the operator's
+# cookies — and one Google account cannot safely serve the public (it gets rate-limited and
+# banned, and every download is attributed to it). So when a passphrase is set, the sources
+# that consume those cookies (YouTube, and Spotify because it resolves via YouTube) require
+# unlocking, while everything that works cookie-free stays open to anyone.
+# Unset = no gate at all (the normal case for a local/personal install).
+ACCESS_PASSPHRASE = os.environ.get("OMNIDL_ACCESS_PASSPHRASE", "").strip()
+
+
+def gate_enabled() -> bool:
+    return bool(ACCESS_PASSPHRASE) and not LOCAL_MODE
+
+
 # Optional yt-dlp PO-token provider (e.g. bgutil-ytdlp-pot-provider's HTTP sidecar).
 # Dormant unless OMNIDL_POT_PROVIDER_URL is set. When set, yt-dlp is told to fetch
 # Proof-of-Origin tokens from it, which clears YouTube "confirm you're not a bot" walls on
