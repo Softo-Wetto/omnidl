@@ -3,6 +3,9 @@ name: Deploy to VPS
 # Push to main -> ship the code to the Hetzner box and restart OmniDL.
 # The SSH key used here is locked to a forced command on the server (it can ONLY run
 # deploy-receive.sh), so a leaked key still can't open a shell on the VPS.
+#
+# The preflight steps are deliberately split into small, precisely-named checks: the step
+# NAME that fails is itself the diagnosis, which is visible without digging through logs.
 
 on:
   push:
@@ -32,9 +35,57 @@ jobs:
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.VPS_DEPLOY_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          # Pin the host key so this can't be silently MITM'd.
           printf '%s\n' "${{ secrets.VPS_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+
+      - name: 'Preflight: VPS_DEPLOY_KEY secret is not empty'
+        run: |
+          if [ ! -s ~/.ssh/deploy_key ] || [ "$(wc -c < ~/.ssh/deploy_key)" -lt 100 ]; then
+            echo "::error::VPS_DEPLOY_KEY is missing or nearly empty. Add it under"
+            echo "::error::Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+          echo "key file bytes: $(wc -c < ~/.ssh/deploy_key)"
+
+      - name: 'Preflight: VPS_DEPLOY_KEY is a valid private key'
+        run: |
+          head -1 ~/.ssh/deploy_key | grep -q 'BEGIN OPENSSH PRIVATE KEY' || {
+            echo "::error::First line is not '-----BEGIN OPENSSH PRIVATE KEY-----'."
+            echo "::error::Copy the WHOLE key block, including the BEGIN and END lines."
+            exit 1; }
+          tail -1 ~/.ssh/deploy_key | grep -q 'END OPENSSH PRIVATE KEY' || {
+            echo "::error::Last line is not '-----END OPENSSH PRIVATE KEY-----'."
+            echo "::error::The END line was probably not copied."
+            exit 1; }
+          ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null || {
+            echo "::error::OpenSSH cannot parse the key (corrupted or re-wrapped on paste)."
+            exit 1; }
+          echo "fingerprint: $(ssh-keygen -lf ~/.ssh/deploy_key)"
+
+      - name: 'Preflight: VPS_KNOWN_HOSTS secret is not empty'
+        run: |
+          grep -q "${VPS_HOST}" ~/.ssh/known_hosts || {
+            echo "::error::VPS_KNOWN_HOSTS is missing or does not mention ${VPS_HOST}."
+            echo "::error::Value should be: ssh-keyscan -t ed25519 ${VPS_HOST}"
+            exit 1; }
+          echo "known_hosts entries: $(wc -l < ~/.ssh/known_hosts)"
+
+      - name: 'Preflight: SSH authenticates to the VPS'
+        run: |
+          out=$(ssh -T -i ~/.ssh/deploy_key -o BatchMode=yes -o ConnectTimeout=15 \
+                    "${VPS_USER}@${VPS_HOST}" ping 2>&1 </dev/null) || true
+          echo "server replied: $out"
+          case "$out" in
+            *pong*) echo "authentication OK" ;;
+            *"Permission denied"*)
+              echo "::error::Key rejected by the server. The VPS_DEPLOY_KEY secret does not"
+              echo "::error::match the public key installed in ~/.ssh/authorized_keys."
+              exit 1 ;;
+            *"Host key verification failed"*)
+              echo "::error::Host key mismatch — refresh the VPS_KNOWN_HOSTS secret."
+              exit 1 ;;
+            *) echo "::error::Unexpected SSH failure: $out"; exit 1 ;;
+          esac
 
       - name: Ship code and restart
         run: |
@@ -64,4 +115,4 @@ jobs:
             if [ "$code" = "200" ]; then echo "OmniDL is up (200)"; exit 0; fi
             echo "attempt $i: got '$code', retrying..."; sleep 5
           done
-          echo "Site did not return 200 after deploy"; exit 1
+          echo "::error::Site did not return 200 after deploy"; exit 1
