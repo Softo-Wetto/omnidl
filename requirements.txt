@@ -5,3 +5,4 @@ yt-dlp
 scdl
 ytmusicapi
 mutagen
+yt-dlp-ejs
