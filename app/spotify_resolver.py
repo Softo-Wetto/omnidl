@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from urllib.error import HTTPError
@@ -106,10 +107,14 @@ def _dig(d, path):
 
 # ---- embed page parsing (always works; capped at 100 for big playlists) ----
 
+def _http(url: str, headers: dict | None = None, timeout: int = 20) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": _UA, **(headers or {})})
+    return urllib.request.urlopen(req, timeout=timeout).read()
+
+
 def _fetch_embed(kind: str, sid: str, timeout: int) -> str:
     url = f"https://open.spotify.com/embed/{kind}/{sid}"
-    req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    return urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "replace")
+    return _http(url, timeout=timeout).decode("utf-8", "replace")
 
 
 def _parse_embed(html: str, kind: str):
@@ -134,7 +139,92 @@ def _parse_embed(html: str, kind: str):
     return name, tracks
 
 
-# ---- full fetch via Spotify's own anonymous token (handles >100 + rich tags) ----
+# ---- full fetch via the web player's GraphQL API (the only working >100 route) ----
+#
+# api.spotify.com refuses anonymous tokens outright (429 QUOTA_EXCEEDED on every endpoint),
+# and the official credentials route needs the app owner to hold Premium. The web player
+# itself doesn't use either: it queries api-partner.spotify.com/pathfinder, which *does*
+# accept the anonymous embed token. That's what lifts the 100-track embed ceiling.
+_PARTNER = "https://api-partner.spotify.com/pathfinder/v1/query"
+# Persisted-query hash for fetchPlaylist. Spotify rotates it with web player releases, so it
+# is re-scraped from the live bundles at runtime; this is only the fallback.
+_FETCH_PLAYLIST_HASH = "86dde7b9d9356e2369414647cf6950cfed96e778e129cfdfc99aea6c1613b3b0"
+_HASH_CACHE: dict[str, str] = {}
+
+
+def _playlist_query_hash(timeout: int = 20) -> str:
+    """Current fetchPlaylist hash, scraped from the web player and cached for the process."""
+    if "h" in _HASH_CACHE:
+        return _HASH_CACHE["h"]
+    hash_value = _FETCH_PLAYLIST_HASH
+    try:
+        home = _http("https://open.spotify.com/", timeout=timeout).decode("utf-8", "replace")
+        for src in dict.fromkeys(re.findall(r'src="(https://open[^"]*spotifycdn\.com/cdn/build/[^"]+\.js)"', home)):
+            js = _http(src, timeout=timeout).decode("utf-8", "replace")
+            m = (re.search(r'"fetchPlaylist"[^}]{0,200}?"([0-9a-f]{64})"', js)
+                 or re.search(r'"([0-9a-f]{64})"[^}]{0,120}?"fetchPlaylist"', js))
+            if m:
+                hash_value = m.group(1)
+                break
+    except Exception:
+        pass                       # keep the fallback; a stale hash just means we degrade
+    _HASH_CACHE["h"] = hash_value
+    return hash_value
+
+
+def _partner_page(pid: str, token: str, offset: int, limit: int, timeout: int):
+    variables = json.dumps({
+        "uri": f"spotify:playlist:{pid}", "offset": offset, "limit": limit,
+        # required Boolean! — omitting it is a hard validation error
+        "enableWatchFeedEntrypoint": False,
+    })
+    extensions = json.dumps({"persistedQuery": {"version": 1, "sha256Hash": _playlist_query_hash(timeout)}})
+    url = (f"{_PARTNER}?operationName=fetchPlaylist"
+           f"&variables={urllib.parse.quote(variables)}&extensions={urllib.parse.quote(extensions)}")
+    raw = _http(url, {"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout)
+    return json.loads(raw)
+
+
+def _track_from_partner(item: dict, ) -> "Track | None":
+    data = (item.get("itemV2") or {}).get("data") or {}
+    name = _clean(data.get("name"))
+    if not name:
+        return None                # local files / unavailable items carry no playable name
+    artists = _dig(data, ["artists", "items"]) or []
+    artist = _clean(_dig(artists[0], ["profile", "name"])) if artists else ""
+    album = _dig(data, ["albumOfTrack", "name"]) or ""
+    sources = _dig(data, ["albumOfTrack", "coverArt", "sources"]) or []
+    cover = max(sources, key=lambda s: s.get("width") or 0).get("url", "") if sources else ""
+    return Track(
+        artist=artist, title=name,
+        duration=_duration_s(_dig(data, ["trackDuration", "totalMilliseconds"])),
+        album=_clean(album), track_number=data.get("trackNumber") or 0, cover_url=cover,
+    )
+
+
+def _partner_playlist(pid: str, token: str, timeout: int) -> tuple[list["Track"], int]:
+    """Every track in the playlist, plus Spotify's own total (which may exceed what's
+    playable — unavailable/local items are counted but have no track data)."""
+    tracks: list[Track] = []
+    offset, total = 0, 0
+    while True:
+        payload = _partner_page(pid, token, offset, 100, timeout)
+        if payload.get("errors"):
+            raise ValueError(str(payload["errors"])[:200])
+        content = _dig(payload, ["data", "playlistV2", "content"]) or {}
+        items = content.get("items") or []
+        total = content.get("totalCount") or total
+        for item in items:
+            track = _track_from_partner(item)
+            if track:
+                tracks.append(track)
+        offset += len(items)
+        if not items or offset >= total or len(tracks) > 10000:
+            break
+    return tracks, total
+
+
+# ---- legacy path: Spotify's own anonymous token (now usually 429s, kept as a fallback) ----
 
 def _token(html: str) -> str | None:
     m = re.search(r'"accessToken":"([^"]+)"', html)
@@ -239,6 +329,17 @@ def resolve(text: str, timeout: int = 20) -> Resolved:
     if token:
         try:
             if kind == "playlist":
+                # The web player's own GraphQL endpoint is the only route that still serves
+                # anonymous callers, and it pages past the embed's 100-track ceiling.
+                try:
+                    full, spotify_total = _partner_playlist(sid, token, timeout)
+                    if full:
+                        # totalCount includes unavailable/local items that carry no track
+                        # data, so only flag truncation if we clearly fell short.
+                        return Resolved(kind, name, full,
+                                        truncated=len(full) < spotify_total - 5)
+                except Exception:
+                    pass                    # fall through to the legacy API, then the embed
                 full = _api_playlist(sid, token, timeout)
             elif kind == "album":
                 name, full = _api_album(sid, token, timeout)

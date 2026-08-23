@@ -3,7 +3,7 @@ from email.message import Message
 from urllib.error import HTTPError
 from unittest.mock import MagicMock, patch
 
-from app.spotify_resolver import Track, _api, resolve
+from app.spotify_resolver import Track, _api, _track_from_partner, resolve
 
 
 class SpotifyResolverTests(unittest.TestCase):
@@ -103,6 +103,58 @@ class SpotifyResolverTests(unittest.TestCase):
 
         self.assertEqual(150, len(resolved.tracks))
         self.assertFalse(resolved.truncated)
+
+
+    def test_partner_graphql_is_preferred_and_lifts_the_100_cap(self):
+        """The web player's GraphQL route is the only one that pages past the embed's 100."""
+        embed_tracks = [Track("A", f"T{n}") for n in range(100)]
+        full = [Track("A", f"T{n}") for n in range(150)]
+
+        with (
+              patch("app.spotify_resolver._fetch_embed", return_value="embed"),
+              patch("app.spotify_resolver._parse_embed", return_value=("Big", embed_tracks)),
+              patch("app.spotify_resolver._token", return_value="token"),
+              patch("app.spotify_resolver._partner_playlist", return_value=(full, 150)) as partner,
+              patch("app.spotify_resolver._api_playlist") as legacy,
+        ):
+            resolved = resolve("https://open.spotify.com/playlist/abc123")
+
+        self.assertEqual(150, len(resolved.tracks))
+        self.assertFalse(resolved.truncated)
+        partner.assert_called_once()
+        legacy.assert_not_called()   # partner succeeded, so don't hit the 429-prone endpoint
+
+    def test_partner_failure_falls_back_to_embed(self):
+        embed_tracks = [Track("A", f"T{n}") for n in range(100)]
+
+        with (
+              patch("app.spotify_resolver._fetch_embed", return_value="embed"),
+              patch("app.spotify_resolver._parse_embed", return_value=("Big", embed_tracks)),
+              patch("app.spotify_resolver._token", return_value="token"),
+              patch("app.spotify_resolver._partner_playlist", side_effect=RuntimeError("graphql down")),
+              patch("app.spotify_resolver._api_playlist", side_effect=RuntimeError("429")),
+        ):
+            resolved = resolve("https://open.spotify.com/playlist/abc123")
+
+        self.assertEqual(100, len(resolved.tracks))
+        self.assertTrue(resolved.truncated)
+
+    def test_partner_item_maps_to_track_with_tags(self):
+        item = {"itemV2": {"data": {
+            "name": "Beauty And A Beat", "trackNumber": 10,
+            "trackDuration": {"totalMilliseconds": 227986},
+            "artists": {"items": [{"profile": {"name": "Justin Bieber"}}]},
+            "albumOfTrack": {"name": "Believe", "coverArt": {"sources": [
+                {"url": "small.jpg", "width": 64}, {"url": "big.jpg", "width": 640}]}},
+        }}}
+        t = _track_from_partner(item)
+        self.assertEqual(("Justin Bieber", "Beauty And A Beat", 228, "Believe", 10), 
+                         (t.artist, t.title, t.duration, t.album, t.track_number))
+        self.assertEqual("big.jpg", t.cover_url)   # largest cover wins
+
+    def test_partner_item_without_name_is_skipped(self):
+        """Local files and unavailable tracks are counted by Spotify but carry no data."""
+        self.assertIsNone(_track_from_partner({"itemV2": {"data": {}}}))
 
 
 if __name__ == "__main__":
