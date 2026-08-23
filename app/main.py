@@ -197,6 +197,7 @@ async def meta(request: Request):
         "video_qualities": settings_mod.VIDEO_QUALITIES,
         "video_containers": settings_mod.VIDEO_CONTAINERS,
         "local": settings_mod.LOCAL_MODE,
+        "max_concurrency": settings_mod.MAX_CONCURRENCY,
         # Access gate: `gated` tells the UI to expect locked sources at all; `unlocked` is
         # this visitor's current state.
         "gated": settings_mod.gate_enabled(),

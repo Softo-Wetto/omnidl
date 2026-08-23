@@ -588,7 +588,9 @@ function loadSettingsForm() {
     $("#set-cookie-file").value = s.cookie_file || "";
   }
   $("#set-bitrate").value = s.bitrate || "";
-  $("#set-concurrency").value = s.concurrency || 3;
+  const maxc = state.meta.max_concurrency || 4;
+  $("#set-concurrency").max = maxc;
+  $("#set-concurrency").value = Math.min(s.concurrency || 3, maxc);
   $("#set-prefer-ytmusic").checked = s.prefer_ytmusic !== false;
   $("#set-match-duration").checked = s.spotify_match_duration !== false;
   $("#set-sponsorblock").checked = !!s.sponsorblock;

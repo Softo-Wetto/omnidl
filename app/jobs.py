@@ -354,6 +354,10 @@ class JobManager:
         Enforced per session *and* per IP — a visitor who clears cookies gets a fresh
         session but still counts against their address.
         """
+        # Local/personal mode is a single-user app on your own machine. These caps exist to
+        # stop strangers exhausting a public server, so here they'd only throttle the owner.
+        if settings_mod.LOCAL_MODE:
+            return None
         now = time.time()
         if self._active_count(session) >= _MAX_ACTIVE_PER_SESSION:
             return f"Too many active downloads (max {_MAX_ACTIVE_PER_SESSION}). Let one finish first."

@@ -69,7 +69,9 @@ SESSION_PREF_KEYS = {
 }
 # Never send these back to a browser.
 _SECRET_KEYS = {"spotify_client_id", "spotify_client_secret", "cookie_file"}
-MAX_CONCURRENCY = 4
+# A home/residential IP tolerates far more parallel YouTube requests than a datacenter
+# one, so the local cap is higher; hosted stays conservative to avoid bot-detection.
+MAX_CONCURRENCY = 8 if LOCAL_MODE else 4
 
 # Audio formats we expose in the UI. opus first: it's YouTube's native codec, so it's
 # remuxed (no re-encode) into the smallest file at full source quality.
