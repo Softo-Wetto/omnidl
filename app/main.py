@@ -321,7 +321,12 @@ async def list_jobs(request: Request):
 def _owned(request: Request, job_id: str):
     """Return the job only if it belongs to the requesting session."""
     job = manager.jobs.get(job_id)
-    if job is None or job.session != _sid(request):
+    if job is None:
+        return None
+    # Single-user install: no other session to protect the job from.
+    if settings_mod.LOCAL_MODE:
+        return job
+    if job.session != _sid(request):
         return None
     return job
 

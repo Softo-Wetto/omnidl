@@ -303,6 +303,8 @@ class JobManager:
     # ----- websocket fan-out --------------------------------------------
     async def broadcast(self, message: dict, session: str | None = None) -> None:
         """Send to every subscriber, or only those in `session` when given."""
+        if settings_mod.LOCAL_MODE:
+            session = None            # single user: every tab should see every job
         dead = []
         for ws, sid in list(self.subscribers.items()):
             if session is not None and sid != session:
@@ -319,6 +321,10 @@ class JobManager:
         await self.broadcast(message, session=job.session)
 
     def _session_jobs(self, session: str) -> list[Job]:
+        # Local/personal mode has exactly one user, so scoping by session would only mean
+        # "a new tab or a cleared cookie hides your own downloads". Show everything.
+        if settings_mod.LOCAL_MODE:
+            return [self.jobs[i] for i in self.order if i in self.jobs]
         return [self.jobs[i] for i in self.order if i in self.jobs and self.jobs[i].session == session]
 
     def list_jobs(self, session: str) -> list[dict]:
@@ -425,7 +431,7 @@ class JobManager:
 
     async def cancel(self, job_id: str, session: str) -> bool:
         job = self.jobs.get(job_id)
-        if job is None or job.session != session:
+        if job is None or (not settings_mod.LOCAL_MODE and job.session != session):
             return False
         if job.status == "running":
             job.status = "cancelled"
@@ -438,7 +444,7 @@ class JobManager:
 
     async def delete(self, job_id: str, session: str) -> bool:
         job = self.jobs.get(job_id)
-        if job is None or job.session != session or job.status == "running":
+        if job is None or (not settings_mod.LOCAL_MODE and job.session != session) or job.status == "running":
             return False
         self.jobs.pop(job_id, None)
         if job_id in self.order:
