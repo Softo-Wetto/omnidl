@@ -904,6 +904,15 @@ async function init() {
   if (urlMedia === "video" || urlMedia === "audio") savedMedia = urlMedia;
   setMediaType(savedMedia, { persist: false });
   bind();
+  // A stale yt-dlp doesn't degrade downloads, it stops them dead (YouTube breaks old
+  // releases). The .exe bundles yt-dlp at build time and never self-updates, so say so.
+  if (state.meta.ytdlp_age_days != null && state.meta.ytdlp_age_days > 30) {
+    const how = state.meta.local
+      ? "Update with: pip install -U yt-dlp  (then rebuild the app)"
+      : "The server updates daily — check the health report.";
+    toast(`⚠ yt-dlp is ${state.meta.ytdlp_age_days} days old (${state.meta.ytdlp_version}). ` +
+          `YouTube downloads may fail. ${how}`, "error", 15000);
+  }
   updateChip();
   connect();
   $("#input").focus();

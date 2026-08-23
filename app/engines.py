@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import settings as _settings
@@ -260,3 +262,39 @@ def describe_command(argv: list[str]) -> str:
         display = f'"{token}"' if " " in token else token
         parts.append(display)
     return " ".join(parts)
+
+# ---- yt-dlp freshness -------------------------------------------------------
+# yt-dlp versions are release dates (e.g. 2026.08.19), so staleness is measurable with no
+# network call. This matters more than it sounds: YouTube routinely breaks older releases
+# outright — a 2026.06.09 build failed *every* YouTube download with a bare 403 until it was
+# updated. The server auto-updates daily, but a frozen .exe bundles whatever was current at
+# build time and never changes, so it needs to say something.
+_YTDLP_AGE_CACHE: dict[str, object] = {}
+
+
+def ytdlp_version() -> str:
+    """Version string of the yt-dlp we actually invoke, or "" if it can't be determined."""
+    if "v" in _YTDLP_AGE_CACHE:
+        return str(_YTDLP_AGE_CACHE["v"])
+    version = ""
+    try:
+        out = subprocess.run([*_tool_cmd("yt-dlp"), "--version"],
+                             capture_output=True, text=True, timeout=30)
+        version = (out.stdout or "").strip().splitlines()[0].strip()
+    except Exception:
+        pass
+    _YTDLP_AGE_CACHE["v"] = version
+    return version
+
+
+def ytdlp_age_days() -> int | None:
+    """How many days old the bundled/installed yt-dlp is, or None if unknown."""
+    version = ytdlp_version()
+    m = re.match(r"^(\d{4})\.(\d{2})\.(\d{2})", version)
+    if not m:
+        return None
+    try:
+        released = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except ValueError:
+        return None
+    return (date.today() - released).days

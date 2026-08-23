@@ -48,6 +48,19 @@ def _log_cookie_health() -> None:
         print(f"[OmniDL] cookies file looks valid: {path}")
 
 
+def _log_ytdlp_age() -> None:
+    """Warn when yt-dlp is old enough that YouTube has likely broken it."""
+    age = engines.ytdlp_age_days()
+    version = engines.ytdlp_version() or "unknown"
+    if age is None:
+        print(f"[OmniDL] yt-dlp {version} (age unknown)")
+    elif age > 30:
+        print(f"[OmniDL] WARNING - yt-dlp {version} is {age} days old. YouTube breaks older "
+              f"releases outright; update it or downloads will start failing with 403.")
+    else:
+        print(f"[OmniDL] yt-dlp {version} ({age} days old)")
+
+
 def _log_pot_provider() -> None:
     if settings_mod.POT_PROVIDER_URL:
         print(f"[OmniDL] PO-token provider active: {settings_mod.POT_PROVIDER_URL} "
@@ -59,6 +72,7 @@ async def lifespan(app: FastAPI):
     manager.start()
     _log_cookie_health()
     _log_pot_provider()
+    _log_ytdlp_age()
     yield
 
 
@@ -206,6 +220,8 @@ async def meta(request: Request):
         "video_containers": settings_mod.VIDEO_CONTAINERS,
         "local": settings_mod.LOCAL_MODE,
         "max_concurrency": settings_mod.MAX_CONCURRENCY,
+        "ytdlp_version": engines.ytdlp_version(),
+        "ytdlp_age_days": engines.ytdlp_age_days(),
         # Access gate: `gated` tells the UI to expect locked sources at all; `unlocked` is
         # this visitor's current state.
         "gated": settings_mod.gate_enabled(),
