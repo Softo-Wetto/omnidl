@@ -626,6 +626,20 @@ class JobManager:
         tracks = resolved.tracks
         total = len(tracks)
         await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
+        if getattr(resolved, "truncated", False):
+            # Spotify's embed tops out at 100 and its API refused the rest, so this is the
+            # first 100 of a larger playlist. Say so unmistakably rather than let the run
+            # look like a complete playlist.
+            await self._emit(
+                job,
+                "\x1b[33m⚠ Spotify returned only the first 100 tracks of this playlist "
+                "(its API is rate-limiting anonymous requests).\x1b[0m\r\n",
+            )
+            await self._emit(
+                job,
+                "\x1b[2m   Downloading those 100. Re-run the playlist later for the rest — "
+                "already-downloaded tracks are skipped.\x1b[0m\r\n",
+            )
 
         if settings.get("skip_existing", True):
             await self._emit(job, "\x1b[2m   Indexing existing music across folders and formats...\x1b[0m\r\n")

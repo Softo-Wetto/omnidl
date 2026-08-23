@@ -51,6 +51,9 @@ class Resolved:
     kind: str
     name: str
     tracks: list["Track"]
+    # True when Spotify's embed cap (100) was hit and the API couldn't supply the rest,
+    # so `tracks` is the first 100 of an unknown larger total.
+    truncated: bool = False
 
 
 def parse_spotify_url(text: str):
@@ -143,17 +146,23 @@ def _api(url: str, token: str, timeout: int = 20):
     # Spotify's anonymous web-player token is periodically rate-limited. Its
     # Retry-After header tells us how long to wait; without this, a large
     # playlist silently falls back to the 100-track embed preview.
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
         except HTTPError as exc:
-            if exc.code != 429 or attempt == 2:
+            if exc.code != 429 or attempt == 3:
                 raise
-            try:
-                delay = float(exc.headers.get("Retry-After", "1"))
-            except (TypeError, ValueError):
-                delay = 1.0
-            time.sleep(max(0.0, min(delay, 10.0)))
+            # Respect Retry-After when given, else back off exponentially. The anonymous
+            # quota is per-IP, so a fresh token alone doesn't help — waiting does.
+            raw = exc.headers.get("Retry-After") if exc.headers else None
+            if raw is not None:
+                try:                       # the server's own figure is authoritative
+                    delay = min(float(raw), 30.0)
+                except (TypeError, ValueError):
+                    delay = 2.0 * (2 ** attempt)
+            else:                          # no guidance -> exponential backoff
+                delay = 2.0 * (2 ** attempt)
+            time.sleep(delay)
 
 
 def _cover(images) -> str:
@@ -239,14 +248,13 @@ def resolve(text: str, timeout: int = 20) -> Resolved:
                 full = []
             if full:
                 return Resolved(kind, name, full)
-        except Exception as exc:
+        except Exception:
+            # The full list needs Spotify's API, which is frequently rate-limited (429) for
+            # anonymous callers. Rather than abandoning a big playlist entirely, fall back to
+            # the 100 tracks the embed does give us and flag it loudly — 100 of N clearly
+            # labelled beats downloading nothing. Short playlists are complete in the embed.
             if kind == "playlist" and len(embed_tracks) >= 100:
-                raise ValueError(
-                    "Spotify could not retrieve the complete playlist after rate-limit retries. "
-                    "Nothing was downloaded; please retry in a few minutes."
-                ) from exc
-            # Short playlists are complete in the embed response, so retain that safe fallback.
-            pass
+                return Resolved(kind, name, embed_tracks, truncated=True)
 
     if not embed_tracks:
         raise ValueError("No tracks found for this Spotify link")
