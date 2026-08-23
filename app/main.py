@@ -100,11 +100,19 @@ def _sid(request: Request) -> str:
     return getattr(request.state, "sid", "") or sessions.new_sid()
 
 
+def _tier(request: Request) -> str:
+    """Access tier for this visitor: "owner", "user", or "" (locked).
+
+    With no gate configured everyone is the owner — that's a personal/local install.
+    """
+    if not settings_mod.gate_enabled():
+        return "owner"
+    return sessions.unlock_tier(_sid(request), request.cookies.get(sessions.UNLOCK_COOKIE)) or ""
+
+
 def _unlocked(request: Request) -> bool:
     """Has this visitor passed the access gate? (Always true when no gate is configured.)"""
-    if not settings_mod.gate_enabled():
-        return True
-    return sessions.unlock_valid(_sid(request), request.cookies.get(sessions.UNLOCK_COOKIE))
+    return bool(_tier(request))
 
 
 def _client_ip(request: Request) -> str:
@@ -202,6 +210,7 @@ async def meta(request: Request):
         # this visitor's current state.
         "gated": settings_mod.gate_enabled(),
         "unlocked": _unlocked(request),
+        "tier": _tier(request),
     }
 
 
@@ -231,8 +240,16 @@ async def unlock(request: Request, payload: dict):
         )
 
     supplied = (payload.get("passphrase") or "").strip()
-    # Constant-time compare so timing can't leak the passphrase.
-    if not _hmac.compare_digest(supplied, settings_mod.ACCESS_PASSPHRASE):
+    # Constant-time compares so timing can't leak either passphrase. Owner is checked first
+    # so it wins if both happen to be set to the same value.
+    owner_pass = settings_mod.OWNER_PASSPHRASE
+    if owner_pass and _hmac.compare_digest(supplied, owner_pass):
+        tier = "owner"
+    elif _hmac.compare_digest(supplied, settings_mod.ACCESS_PASSPHRASE):
+        tier = "user"
+    else:
+        tier = ""
+    if not tier:
         _UNLOCK_FAILS.setdefault(ip, []).append(now)
         left = _UNLOCK_MAX_FAILS - len(_UNLOCK_FAILS[ip])
         return JSONResponse(
@@ -241,9 +258,9 @@ async def unlock(request: Request, payload: dict):
 
     sid = _sid(request)
     _UNLOCK_FAILS.pop(ip, None)
-    response = JSONResponse({"ok": True, "unlocked": True})
+    response = JSONResponse({"ok": True, "unlocked": True, "tier": tier})
     response.set_cookie(
-        sessions.UNLOCK_COOKIE, sessions.unlock_token(sid),
+        sessions.UNLOCK_COOKIE, sessions.unlock_cookie(sid, tier),
         max_age=sessions.COOKIE_MAX_AGE, httponly=True, samesite="lax",
         secure=sessions.COOKIE_SECURE,
     )
@@ -298,7 +315,7 @@ async def download(request: Request, payload: dict):
 
     sid = _sid(request)
     ip = _client_ip(request)
-    limit = manager.check_limit(sid, ip)
+    limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
     s = settings_mod.effective_settings(SESSION_PREFS.get(sid))

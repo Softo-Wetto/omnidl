@@ -39,18 +39,33 @@ def sign(sid: str) -> str:
 UNLOCK_COOKIE = "omnidl_unlock"
 
 
-def unlock_token(sid: str) -> str:
+def unlock_token(sid: str, tier: str = "user") -> str:
     """Proof that this session passed the access gate.
 
     Kept in its own signed cookie rather than server memory so an unlocked visitor stays
     unlocked across restarts and deploys. Bound to the session id, so it can't be lifted
     from one browser and replayed in another.
     """
-    return hmac.new(_SECRET, f"unlock:{sid}".encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.new(_SECRET, f"unlock:{tier}:{sid}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def unlock_cookie(sid: str, tier: str) -> str:
+    """Cookie value carrying the tier, signed so the tier itself can't be edited upward."""
+    return f"{tier}|{unlock_token(sid, tier)}"
+
+
+def unlock_tier(sid: str, cookie_value: str | None) -> str | None:
+    """Return the granted tier ("owner"/"user") for this session, or None."""
+    if not cookie_value or "|" not in cookie_value:
+        return None
+    tier, _, mac = cookie_value.partition("|")
+    if tier in ("user", "owner") and hmac.compare_digest(mac, unlock_token(sid, tier)):
+        return tier
+    return None
 
 
 def unlock_valid(sid: str, cookie_value: str | None) -> bool:
-    return bool(cookie_value) and hmac.compare_digest(cookie_value, unlock_token(sid))
+    return unlock_tier(sid, cookie_value) is not None
 
 
 def read_valid_sid(cookie_value: str | None) -> str | None:

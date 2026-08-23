@@ -50,6 +50,12 @@ LOCAL_MODE = _env_bool("OMNIDL_LOCAL", default=_HOST_IS_LOCAL)
 ACCESS_PASSPHRASE = os.environ.get("OMNIDL_ACCESS_PASSPHRASE", "").strip()
 
 
+# A separate, private passphrase for you. Same unlock dialog, but it also lifts the abuse
+# limits — so you can use the public site as freely as a local install, while friends holding
+# the shared passphrase stay rate-limited (which is what protects the shared YouTube account).
+OWNER_PASSPHRASE = os.environ.get("OMNIDL_OWNER_PASSPHRASE", "").strip()
+
+
 def gate_enabled() -> bool:
     return bool(ACCESS_PASSPHRASE) and not LOCAL_MODE
 

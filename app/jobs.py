@@ -354,7 +354,7 @@ class JobManager:
     def _recent(times: list[float], now: float) -> list[float]:
         return [t for t in times if now - t < _RATE_WINDOW]
 
-    def check_limit(self, session: str, ip: str = "") -> str | None:
+    def check_limit(self, session: str, ip: str = "", unlimited: bool = False) -> str | None:
         """Return an error message if this caller may not submit right now, else None.
 
         Enforced per session *and* per IP — a visitor who clears cookies gets a fresh
@@ -362,7 +362,7 @@ class JobManager:
         """
         # Local/personal mode is a single-user app on your own machine. These caps exist to
         # stop strangers exhausting a public server, so here they'd only throttle the owner.
-        if settings_mod.LOCAL_MODE:
+        if settings_mod.LOCAL_MODE or unlimited:
             return None
         now = time.time()
         if self._active_count(session) >= _MAX_ACTIVE_PER_SESSION:
