@@ -4,7 +4,8 @@ const $ = (sel) => document.querySelector(sel);
 
 const state = {
   settings: {},
-  meta: { engines: {}, formats: [], video_qualities: [], video_containers: [] },
+  meta: { engines: {}, formats: [], video_qualities: [], video_containers: [],
+         naming_orders: [], naming_artists: [] },
   jobs: new Map(),
   order: [],
   viewingId: null,
@@ -568,12 +569,12 @@ async function submitDownload() {
 }
 
 /* ---------------- settings ---------------- */
-function fillSelect(sel, items, current) {
+function fillSelect(sel, items, current, labels) {
   sel.innerHTML = "";
   for (const it of items) {
     const opt = document.createElement("option");
     opt.value = it;
-    opt.textContent = it;
+    opt.textContent = (labels && labels[it]) || it;
     if (it === current) opt.selected = true;
     sel.append(opt);
   }
@@ -597,12 +598,32 @@ function loadSettingsForm() {
   $("#set-skip-existing").checked = s.skip_existing !== false;
   fillSelect($("#set-format"), state.meta.formats, s.audio_format);
   fillSelect($("#set-video-container"), state.meta.video_containers, s.video_container || "mp4");
+  fillSelect($("#set-naming-order"), state.meta.naming_orders, s.naming_order || "artist-title",
+             { "artist-title": "Artist - Title", "title-artist": "Title - Artist" });
+  fillSelect($("#set-naming-artists"), state.meta.naming_artists, s.naming_artists || "all",
+             { all: "All credited artists", primary: "Lead artist only" });
+  updateNamingPreview();
+}
+
+// Show the exact filename the current choice produces. Naming is a compatibility setting,
+// not a cosmetic one - picking the convention that does not match an existing library
+// silently re-downloads everything under a second name.
+function updateNamingPreview() {
+  const el = $("#naming-preview");
+  if (!el) return;
+  const order = ($("#set-naming-order") || {}).value || "artist-title";
+  const mode = ($("#set-naming-artists") || {}).value || "all";
+  const who = mode === "primary" ? "Justin Bieber" : "Justin Bieber, Daniel Caesar, Giveon";
+  const ext = ($("#set-format") || {}).value || "opus";
+  el.textContent = (order === "title-artist" ? `Peaches - ${who}` : `${who} - Peaches`) + "." + ext;
 }
 
 async function saveSettings() {
   const payload = {
     audio_format: $("#set-format").value,
     video_container: $("#set-video-container").value,
+    naming_order: $("#set-naming-order").value,
+    naming_artists: $("#set-naming-artists").value,
     bitrate: $("#set-bitrate").value.trim(),
     concurrency: $("#set-concurrency").value,
     prefer_ytmusic: $("#set-prefer-ytmusic").checked,
@@ -838,6 +859,10 @@ function bind() {
   $("#open-settings").onclick = openSettings;
   $("#close-settings").onclick = closeSettings;
   $("#save-settings").onclick = saveSettings;
+  for (const id of ["#set-naming-order", "#set-naming-artists", "#set-format"]) {
+    const el = $(id);
+    if (el) el.addEventListener("change", updateNamingPreview);
+  }
   $("#close-library").onclick = closeLibrary;
   $("#scan-library").onclick = scanLibrary;
   $("#library-search").addEventListener("input", renderLibrary);

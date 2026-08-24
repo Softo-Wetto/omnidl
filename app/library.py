@@ -16,7 +16,14 @@ _NON_WORD_RE = re.compile(r"[^\w]+", re.UNICODE)
 
 
 def _normalise(value: str) -> str:
-    value = unicodedata.normalize("NFKC", value or "").casefold()
+    """Fold a name to a comparison key: case, punctuation and accents all ignored.
+
+    Accents matter here because sources disagree on them - Spotify returns "GIVEON" as
+    "GIVEON" with a macron while spotdl tagged the same artist plainly. Comparing them
+    literally means the same song is downloaded twice.
+    """
+    value = unicodedata.normalize("NFKD", value or "").casefold()
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
     return _SPACE_RE.sub(" ", _NON_WORD_RE.sub(" ", value)).strip()
 
 
@@ -79,11 +86,20 @@ class LibraryTrack:
     issues: tuple[str, ...]
 
     @property
+    def raw_artist(self) -> str:
+        """The credit string as written, separators intact ("A/B", "A, B", "A feat. B").
+
+        `identity` normalises those separators away, so alias splitting has to start here
+        or a multi-artist file can never be matched by its lead artist alone.
+        """
+        fallback = _filename_identity(Path(self.relative_path))
+        return self.artist or (fallback[0] if fallback else "")
+
+    @property
     def identity(self) -> tuple[str, str] | None:
         fallback = _filename_identity(Path(self.relative_path))
-        artist = self.artist or (fallback[0] if fallback else "")
         title = self.title or (fallback[1] if fallback else "")
-        key = (_normalise(artist), _normalise(title))
+        key = (_normalise(self.raw_artist), _normalise(title))
         return key if all(key) else None
 
     @property
@@ -165,16 +181,49 @@ def _best_track(tracks: Iterable[LibraryTrack]) -> LibraryTrack:
     )
 
 
+def _artist_aliases(artist: str) -> list[str]:
+    """Every spelling of a credit list that should count as the same artist.
+
+    A library is rarely written by one tool. spotdl names files with every credited
+    artist ("Bieber, Daniel Caesar, Giveon - Peaches") while a lead-artist convention
+    writes "Bieber - Peaches", and tag writers use "/" or "feat." instead of commas.
+    Indexing only the literal string means the same song is re-downloaded under the
+    other spelling, which is exactly the duplicate this index exists to prevent.
+    """
+    raw = (artist or "").strip()
+    if not raw:
+        return []
+    parts = [p.strip() for p in re.split(r"\s*(?:,|/|;|&|\bfeat\.?\b|\bft\.?\b|\bwith\b)\s*",
+                                         raw, flags=re.IGNORECASE) if p.strip()]
+    aliases = {_normalise(raw)}
+    if parts:
+        aliases.add(_normalise(parts[0]))          # lead artist alone
+        aliases.add(_normalise(", ".join(parts)))  # canonical comma form
+    return [a for a in aliases if a]
+
+
 class LibraryIndex:
     def __init__(self, tracks: Iterable[LibraryTrack]):
         self.tracks = list(tracks)
         self._by_identity: dict[tuple[str, str], list[LibraryTrack]] = {}
         for item in self.tracks:
-            if item.identity:
-                self._by_identity.setdefault(item.identity, []).append(item)
+            if not item.identity:
+                continue
+            artist, title = item.identity
+            # Alias from the RAW credit string - item.identity has already collapsed the
+            # "/" and "," separators, so splitting it would only ever yield one name.
+            for alias in set(_artist_aliases(item.raw_artist)) | {artist}:
+                self._by_identity.setdefault((alias, title), []).append(item)
 
     def find(self, artist: str, title: str, duration: int = 0) -> LibraryTrack | None:
-        matches = self._by_identity.get((_normalise(artist), _normalise(title)), [])
+        key_title = _normalise(title)
+        matches: list[LibraryTrack] = []
+        seen: set[int] = set()
+        for alias in _artist_aliases(artist) or [_normalise(artist)]:
+            for item in self._by_identity.get((alias, key_title), []):
+                if id(item) not in seen:
+                    seen.add(id(item))
+                    matches.append(item)
         if duration:
             matches = [
                 item for item in matches

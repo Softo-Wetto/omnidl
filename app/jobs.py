@@ -745,7 +745,9 @@ class JobManager:
         """
         out_dir = Path(settings["output_dir"])
         ext = settings.get("audio_format", "opus")
-        target = out_dir / f"{track.filename}.{ext}"
+        basename = track.filename_for(settings.get("naming_order", "artist-title"),
+                                      settings.get("naming_artists", "all"))
+        target = out_dir / f"{basename}.{ext}"
         key = f"t{index}"
         label = f"\x1b[1;36m[{index}/{total}]\x1b[0m \x1b[1m{track.artist} - {track.title}\x1b[0m"
 
@@ -820,9 +822,9 @@ class JobManager:
                     suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
                     await status(f"\x1b[2m? trying {cand.source} (score {decision.score}/100){suffix}...\x1b[0m")
                     code = await self._stream_subprocess(
-                        job, engines.media_url_command(cand.url, track.filename, settings),
+                        job, engines.media_url_command(cand.url, basename, settings),
                         emit=detailed, progress_cb=None if detailed else progress)
-                    self._cleanup_sidecars(out_dir, track.filename, ext)
+                    self._cleanup_sidecars(out_dir, basename, ext)
                     if code == 0 and target.exists():
                         ok = True
                         break

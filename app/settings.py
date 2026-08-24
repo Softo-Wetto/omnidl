@@ -72,6 +72,7 @@ POT_PROVIDER_URL = os.environ.get("OMNIDL_POT_PROVIDER_URL", "").strip()
 SESSION_PREF_KEYS = {
     "audio_format", "video_container", "bitrate", "concurrency",
     "prefer_ytmusic", "spotify_match_duration", "sponsorblock", "skip_existing",
+    "naming_order", "naming_artists",
 }
 # Never send these back to a browser.
 _SECRET_KEYS = {"spotify_client_id", "spotify_client_secret", "cookie_file"}
@@ -90,6 +91,14 @@ VIDEO_QUALITIES = ["Best", "2160p", "1440p", "1080p", "720p", "480p", "360p"]
 VIDEO_CONTAINERS = ["mp4", "mkv"]
 BROWSERS = ["none", "chrome", "firefox", "edge", "brave", "chromium", "opera", "vivaldi"]
 
+# How downloaded files are named. This is a compatibility setting, not a cosmetic one:
+# a library built as "Artist - Title" gains a silent duplicate for every track saved as
+# "Title - Artist", because neither the filename nor the library index will match.
+NAMING_ORDERS = ["artist-title", "title-artist"]
+# "all" credits every artist Spotify lists ("Bieber, Daniel Caesar, Giveon - Peaches"),
+# matching spotdl's own {artists} template; "primary" keeps just the lead artist.
+NAMING_ARTISTS = ["all", "primary"]
+
 DEFAULTS: dict[str, Any] = {
     "spotify_client_id": "",
     "spotify_client_secret": "",
@@ -104,6 +113,10 @@ DEFAULTS: dict[str, Any] = {
     "video_quality": "1080p",
     "video_container": "mp4",
     "spotify_template": "{artists} - {title}.{output-ext}",
+    # Default to every artist so OmniDL's own downloads match the spotdl template above
+    # (and the libraries most people already have) instead of silently duplicating them.
+    "naming_order": "artist-title",
+    "naming_artists": "all",
     # How to handle Spotify links:
     #   "embed"  -> scrape the public embed page for the track list, download via yt-dlp
     #               (free, no API, no Premium — the default since Spotify locked the API).
@@ -173,6 +186,8 @@ def save_settings(new: dict) -> dict:
                     value = DEFAULTS["concurrency"]
             elif key in BOOL_KEYS:
                 value = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
+            elif key in ("naming_order", "naming_artists"):
+                value = _coerce_pref(key, value)
             data[key] = value
     CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
     ensure_output_dir(data["output_dir"])
@@ -193,6 +208,10 @@ def _coerce_pref(key: str, value: Any) -> Any:
         return value if value in AUDIO_FORMATS else DEFAULTS["audio_format"]
     if key == "video_container":
         return value if value in VIDEO_CONTAINERS else DEFAULTS["video_container"]
+    if key == "naming_order":
+        return value if value in NAMING_ORDERS else DEFAULTS["naming_order"]
+    if key == "naming_artists":
+        return value if value in NAMING_ARTISTS else DEFAULTS["naming_artists"]
     return value
 
 

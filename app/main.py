@@ -220,6 +220,8 @@ async def meta(request: Request):
         "video_containers": settings_mod.VIDEO_CONTAINERS,
         "local": settings_mod.LOCAL_MODE,
         "max_concurrency": settings_mod.MAX_CONCURRENCY,
+        "naming_orders": settings_mod.NAMING_ORDERS,
+        "naming_artists": settings_mod.NAMING_ARTISTS,
         "ytdlp_version": engines.ytdlp_version(),
         "ytdlp_age_days": engines.ytdlp_age_days(),
         # Access gate: `gated` tells the UI to expect locked sources at all; `unlocked` is

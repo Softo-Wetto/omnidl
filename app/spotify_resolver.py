@@ -12,7 +12,7 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.error import HTTPError
 
 _ID_RE = re.compile(r"(track|album|playlist|artist)[/:]([A-Za-z0-9]+)")
@@ -34,17 +34,41 @@ class Track:
     album: str = ""
     track_number: int = 0
     cover_url: str = ""
+    date: str = ""          # ISO release date, "" if unknown
+    # Every credited artist, in Spotify's order. `artist` stays the primary one because
+    # YouTube searches hit far more reliably with "Bieber - Peaches" than with the full
+    # "Bieber, Daniel Caesar, Giveon - Peaches", but filenames and tags should credit all.
+    artists: list[str] = field(default_factory=list)
+
+    @property
+    def all_artists(self) -> str:
+        return ", ".join(self.artists) if self.artists else self.artist
 
     @property
     def query(self) -> str:
+        """Search text — deliberately the primary artist only (best match rate)."""
         return f"{self.artist} - {self.title}".strip(" -")
+
+    def filename_for(self, order: str = "artist-title", artists: str = "all") -> str:
+        """Safe base filename (no extension) in the configured naming convention.
+
+        Exists so a library built under one convention isn't duplicated by downloads
+        under another: "Bieber - Peaches" and "Bieber, Daniel Caesar, Giveon - Peaches"
+        are the same song but different files.
+        """
+        who = self.artist if artists == "primary" else self.all_artists
+        if not who:
+            base = self.title or "track"
+        elif order == "title-artist":
+            base = f"{self.title} - {who}"
+        else:
+            base = f"{who} - {self.title}"
+        base = _ILLEGAL.sub("_", base.strip(" -"))
+        return base[:180].strip().rstrip(".")
 
     @property
     def filename(self) -> str:
-        """Safe base filename derived from Spotify metadata (no extension)."""
-        base = self.query or self.title or "track"
-        base = _ILLEGAL.sub("_", base)
-        return base[:180].strip().rstrip(".")
+        return self.filename_for()
 
 
 @dataclass
@@ -89,6 +113,19 @@ def _primary_artist(subtitle: str | None) -> str:
     return subtitle.split(",")[0].strip()
 
 
+def _subtitle_artists(subtitle: str | None) -> list[str]:
+    """Split an embed "subtitle" ("Bieber, Daniel Caesar, GIVEON") into its artists."""
+    return [p.strip() for p in _clean(subtitle).split(",") if p.strip()]
+
+
+def _visual_cover(entity: dict) -> str:
+    """Largest cover URL from an embed entity's visualIdentity, or ""."""
+    images = _dig(entity, ["visualIdentity", "image"]) or []
+    if not images:
+        return ""
+    return max(images, key=lambda i: i.get("maxWidth") or 0).get("url", "")
+
+
 def _duration_s(value) -> int:
     """Spotify gives duration in milliseconds; return whole seconds."""
     try:
@@ -127,15 +164,25 @@ def _parse_embed(html: str, kind: str):
     tracks: list[Track] = []
     for item in entity.get("trackList") or []:
         title = _clean(item.get("title"))
-        artist = _primary_artist(item.get("subtitle")) or _clean(item.get("subtitle"))
+        names = _subtitle_artists(item.get("subtitle"))
         if title:
-            tracks.append(Track(artist, title, _duration_s(item.get("duration"))))
+            tracks.append(Track(
+                artist=names[0] if names else _clean(item.get("subtitle")),
+                title=title, duration=_duration_s(item.get("duration")),
+                artists=names, cover_url=_visual_cover(item),
+            ))
     if not tracks and kind == "track":
         title = _clean(entity.get("title") or entity.get("name"))
-        artists = entity.get("artists") or []
-        artist = _clean(artists[0].get("name")) if artists else _primary_artist(entity.get("subtitle"))
+        names = [_clean(a.get("name")) for a in (entity.get("artists") or []) if a.get("name")]
+        if not names:
+            names = _subtitle_artists(entity.get("subtitle"))
         if title:
-            tracks.append(Track(artist, title, _duration_s(entity.get("duration"))))
+            tracks.append(Track(
+                artist=names[0] if names else "", title=title,
+                duration=_duration_s(entity.get("duration")), artists=names,
+                cover_url=_visual_cover(entity),
+                date=_clean(_dig(entity, ["releaseDate", "isoString"]))[:10],
+            ))
     return name, tracks
 
 
@@ -191,12 +238,13 @@ def _track_from_partner(item: dict, ) -> "Track | None":
     if not name:
         return None                # local files / unavailable items carry no playable name
     artists = _dig(data, ["artists", "items"]) or []
-    artist = _clean(_dig(artists[0], ["profile", "name"])) if artists else ""
+    names = [n for n in (_clean(_dig(a, ["profile", "name"])) for a in artists) if n]
+    artist = names[0] if names else ""
     album = _dig(data, ["albumOfTrack", "name"]) or ""
     sources = _dig(data, ["albumOfTrack", "coverArt", "sources"]) or []
     cover = max(sources, key=lambda s: s.get("width") or 0).get("url", "") if sources else ""
     return Track(
-        artist=artist, title=name,
+        artist=artist, title=name, artists=names,
         duration=_duration_s(_dig(data, ["trackDuration", "totalMilliseconds"])),
         album=_clean(album), track_number=data.get("trackNumber") or 0, cover_url=cover,
     )
@@ -262,10 +310,11 @@ def _cover(images) -> str:
 def _track_from_api(t: dict, album_name: str = "", cover: str = "") -> Track | None:
     if not t or not t.get("name"):
         return None
-    artists = ", ".join(a["name"] for a in t.get("artists", []) if a.get("name"))
+    names = [_clean(a["name"]) for a in t.get("artists", []) if a.get("name")]
     album = t.get("album") or {}
     return Track(
-        artist=_clean(artists.split(",")[0]) or _clean(artists),
+        artist=names[0] if names else "",
+        artists=names,
         title=_clean(t["name"]),
         duration=_duration_s(t.get("duration_ms")),
         album=_clean(album.get("name") or album_name),
