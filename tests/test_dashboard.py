@@ -41,6 +41,20 @@ class HeaderSemantics(HTMLParser):
             self.utility_groups += 1
         if tag == "svg" and "nav-icon-svg" in attributes.get("class", "").split():
             self.navigation_icons += 1
+class SettingsSemantics(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.grids = 0
+        self.fields = 0
+        self.headings = 0
+        self.previews = 0
+
+    def handle_starttag(self, tag, attrs):
+        classes = dict(attrs).get("class", "").split()
+        self.grids += "settings-control-grid" in classes
+        self.fields += "settings-field" in classes
+        self.headings += "settings-field-heading" in classes
+        self.previews += "settings-preview" in classes
 
 class DashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_dashboard_sends_real_unicode_icons(self):
@@ -62,6 +76,14 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(1, parser.utility_groups)
         self.assertEqual(4, parser.navigation_icons)
+    async def test_settings_controls_use_an_aligned_six_field_grid(self):
+        parser = SettingsSemantics()
+        parser.feed((await response_body(await dashboard())).decode("utf-8-sig"))
+
+        self.assertEqual(1, parser.grids)
+        self.assertEqual(6, parser.fields)
+        self.assertEqual(6, parser.headings)
+        self.assertEqual(1, parser.previews)
 
 if __name__ == "__main__":
     unittest.main()

@@ -159,28 +159,43 @@
           <input id="set-cookie-file" type="text" autocomplete="off" spellcheck="false"
                  placeholder="C:\path\to\cookies.txt" />
         </label>
-        <div class="row">
-          <label>Audio format
+        <div class="settings-control-grid">
+          <label class="settings-field">
+            <span class="settings-field-heading"><span class="settings-field-title">Audio format</span></span>
             <select id="set-format"></select>
           </label>
-          <label>Bitrate
+          <label class="settings-field">
+            <span class="settings-field-heading"><span class="settings-field-title">Bitrate</span></span>
             <input id="set-bitrate" type="text" placeholder="320k / auto / disable" />
           </label>
-          <label>Video container <span class="muted">(video mode)</span>
+          <label class="settings-field">
+            <span class="settings-field-heading">
+              <span class="settings-field-title">Video container</span>
+              <span class="settings-field-help">Video downloads</span>
+            </span>
             <select id="set-video-container"></select>
           </label>
-          <label>File naming
+          <label class="settings-field">
+            <span class="settings-field-heading"><span class="settings-field-title">File naming</span></span>
             <select id="set-naming-order"></select>
           </label>
-          <label>Artists in name
+          <label class="settings-field">
+            <span class="settings-field-heading"><span class="settings-field-title">Artists in name</span></span>
             <select id="set-naming-artists"></select>
           </label>
-          <label>Parallel <span class="muted">(playlist)</span>
+          <label class="settings-field">
+            <span class="settings-field-heading">
+              <span class="settings-field-title">Parallel downloads</span>
+              <span class="settings-field-help">Playlists only</span>
+            </span>
             <input id="set-concurrency" type="number" min="1" max="4" />
           </label>
         </div>
-        <p class="naming-preview muted">Saved as <code id="naming-preview">—</code>
-          <span class="muted">— match your existing library or you'll get duplicates.</span></p>
+        <div class="settings-preview">
+          <span class="settings-preview-label">Filename preview</span>
+          <code id="naming-preview">—</code>
+          <span class="settings-preview-note">Match your existing library naming to avoid duplicates.</span>
+        </div>
         <label class="switch-row">
           <span>Trim non-music segments <span class="muted">(SponsorBlock: intros/outros/ads)</span></span>
           <input id="set-sponsorblock" type="checkbox" class="switch" />
