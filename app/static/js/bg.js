@@ -10,6 +10,8 @@
   let w = 0, h = 0, dpr = Math.min(window.devicePixelRatio || 1, 2);
   let particles = [];
   let raf = null;
+  let lastFrame = -Infinity;
+  const frameInterval = 1000 / 30;
   const mouse = { x: -9999, y: -9999 };
 
   function accent() {
@@ -41,7 +43,7 @@
     return `rgba(${r},${g},${b},${a})`;
   }
 
-  function frame() {
+  function draw() {
     ctx.clearRect(0, 0, w, h);
     const maxDist = 130;
     for (const p of particles) {
@@ -70,14 +72,25 @@
         }
       }
     }
-    raf = requestAnimationFrame(frame);
   }
 
-  function start() { if (!raf && !reduce) raf = requestAnimationFrame(frame); }
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    if (now - lastFrame < frameInterval) return;
+    lastFrame = now;
+    draw();
+  }
+
+  function start() {
+    if (!raf && !reduce) {
+      lastFrame = -Infinity;
+      raf = requestAnimationFrame(frame);
+    }
+  }
   function stop() { if (raf) { cancelAnimationFrame(raf); raf = null; } }
 
   resize();
-  if (reduce) { frame(); }  // draw one static frame
+  if (reduce) { draw(); }  // draw one static frame
   else start();
 
   window.addEventListener("resize", () => { dpr = Math.min(window.devicePixelRatio || 1, 2); resize(); });

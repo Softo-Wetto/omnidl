@@ -3,15 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import mimetypes
+import re
 import subprocess
 import sys
 import tempfile
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
@@ -32,6 +34,21 @@ if getattr(sys, "frozen", False):
 else:
     STATIC_DIR = Path(__file__).resolve().parent / "static"
 manager = JobManager()
+
+
+def _asset_version() -> str:
+    """Change cached asset URLs whenever a bundled CSS/JS/image file changes."""
+    modified = (
+        path.stat().st_mtime_ns
+        for path in STATIC_DIR.rglob("*")
+        if path.is_file() and path.suffix.lower() != ".html"
+    )
+    return format(max(modified, default=0), "x")
+
+
+ASSET_VERSION = _asset_version()
+_STATIC_URL_RE = re.compile(r'(/static/[^"\s>]+)')
+_PAGE_CACHE: dict[str, str] = {}
 
 
 def _log_cookie_health() -> None:
@@ -77,12 +94,15 @@ async def lifespan(app: FastAPI):
 
 
 class NoCacheStaticFiles(StaticFiles):
-    """Serve static files with revalidation so an updated app.js/style.css is never
-    masked by a stale browser cache (the cause of "the button does nothing")."""
+    """Cache only URLs tied to the current build; revalidate unversioned requests."""
 
     async def get_response(self, path, scope):
         response = await super().get_response(path, scope)
-        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        query = parse_qs(scope.get("query_string", b"").decode("ascii", "ignore"))
+        if query.get("v") == [ASSET_VERSION]:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
         return response
 
 
@@ -142,8 +162,13 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
-def _page(name: str) -> FileResponse:
-    return FileResponse(str(STATIC_DIR / name), headers=_NO_CACHE)
+def _page(name: str) -> HTMLResponse:
+    html = _PAGE_CACHE.get(name)
+    if html is None:
+        source = (STATIC_DIR / name).read_text(encoding="utf-8-sig")
+        html = _STATIC_URL_RE.sub(lambda match: f"{match.group(1)}?v={ASSET_VERSION}", source)
+        _PAGE_CACHE[name] = html
+    return HTMLResponse(html, headers=_NO_CACHE)
 
 
 @app.get("/robots.txt")

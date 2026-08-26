@@ -844,6 +844,14 @@ function toggleTheme() {
 }
 
 /* ---------------- wire up ---------------- */
+function syncEnvironmentControls() {
+  const local = !!state.meta.local;
+  $("#open-library").hidden = !local;
+  $("#open-folder").hidden = !local;
+  const hint = $("#hosted-hint");
+  if (hint) hint.hidden = local;
+}
+
 function bind() {
   $("#download").onclick = submitDownload;
   $("#input").addEventListener("input", updateChip);
@@ -867,21 +875,11 @@ function bind() {
   $("#scan-library").onclick = scanLibrary;
   $("#library-search").addEventListener("input", renderLibrary);
   $("#theme-toggle").onclick = toggleTheme;
-  if (state.meta.local) {
-    const libraryButton = $("#open-library");
-    libraryButton.hidden = false;
-    libraryButton.onclick = openLibrary;
-    const fb = $("#open-folder");
-    fb.hidden = false;
-    fb.onclick = async () => {
-      const r = await api("/api/open-folder", "POST");
-      if (r && r.error) toast(r.error, "error");
-    };
-  } else {
-    // Hosted: there's no server folder to open, so explain how files reach the visitor.
-    const hint = $("#hosted-hint");
-    if (hint) hint.hidden = false;
-  }
+  $("#open-library").onclick = openLibrary;
+  $("#open-folder").onclick = async () => {
+    const r = await api("/api/open-folder", "POST");
+    if (r && r.error) toast(r.error, "error");
+  };
   $("#clear-term").onclick = () => termClear(true);
   $("#jump-latest").onclick = () => logView.jump();
   $("#copy-log").onclick = async () => {
@@ -921,14 +919,22 @@ function bind() {
 
 async function init() {
   applyTheme(document.documentElement.classList.contains("light") ? "light" : "dark");
-  state.meta = await api("/api/meta");
-  state.settings = await api("/api/settings");
   let savedMedia = "audio";
   try { savedMedia = localStorage.getItem("omnidl-media") || "audio"; } catch (_) {}
   const urlMedia = new URLSearchParams(location.search).get("media");  // ?media=video deep-link
   if (urlMedia === "video" || urlMedia === "audio") savedMedia = urlMedia;
-  setMediaType(savedMedia, { persist: false });
-  bind();
+  await OmniStartup.startDashboard({
+    bind,
+    loadMeta: () => api("/api/meta"),
+    loadSettings: () => api("/api/settings"),
+    hydrate(meta, settings) {
+      state.meta = meta;
+      state.settings = settings;
+      setMediaType(savedMedia, { persist: false });
+      syncEnvironmentControls();
+      if (!$("#settings-modal").classList.contains("hidden")) loadSettingsForm();
+    },
+  });
   // A stale yt-dlp doesn't degrade downloads, it stops them dead (YouTube breaks old
   // releases). The .exe bundles yt-dlp at build time and never self-updates, so say so.
   if (state.meta.ytdlp_age_days != null && state.meta.ytdlp_age_days > 30) {

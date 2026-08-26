@@ -481,15 +481,15 @@ select:hover, input[type="text"]:hover, input[type="password"]:hover, input[type
 /* ============================================================
    Dashboard polish — motion & depth for everything around the log
    ============================================================ */
-@keyframes rise { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: none; } }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes conn-pulse { 0%, 70% { box-shadow: 0 0 0 0 rgba(69,212,131,.5); } 100% { box-shadow: 0 0 0 6px rgba(69,212,131,0); } }
 @keyframes badge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .6; } }
 
 @media (prefers-reduced-motion: no-preference) {
-  .topbar { animation: rise .4s ease both; }
-  .smartbar { animation: rise .45s .06s ease both; }
-  .terminal-wrap { animation: rise .5s .12s ease both; }
-  .queue-wrap { animation: rise .5s .18s ease both; }
+  .topbar { animation: rise .16s ease both; }
+  .smartbar { animation: rise .18s ease both; }
+  .terminal-wrap { animation: rise .2s ease both; }
+  .queue-wrap { animation: rise .2s ease both; }
   .conn.on i { animation: conn-pulse 1.8s ease-out infinite; }
   .badge.running { animation: badge-pulse 1.6s ease-in-out infinite; }
 }

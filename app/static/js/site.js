@@ -77,7 +77,7 @@
       els.forEach((el) => {
         const p = el.parentElement;          // stagger siblings in the same grid/row
         const i = counts.get(p) || 0;
-        el.style.transitionDelay = Math.min(i * 70, 350) + "ms";
+        el.style.transitionDelay = Math.min(i * 16, 80) + "ms";
         counts.set(p, i + 1);
         io.observe(el);
       });
