@@ -68,6 +68,8 @@ python run.py
   - `youtube.com` / `youtu.be` → **yt-dlp**
   - `soundcloud.com` → **scdl**
 - **Type a search** (no URL) — routed to a **yt-dlp** YouTube search.
+- **☰ Bulk** — paste a whole list, one song per line, and download it as a single job.
+  See [Bulk paste](#bulk-paste).
 - Use the **engine dropdown** to force a specific tool, and the **format dropdown** for a
   one-off format override.
 - The **queue** runs jobs one at a time (avoids YouTube rate-limits) and shows a live
@@ -87,6 +89,47 @@ python run.py
   *cancelled (interrupted)*.
 - **Light / dark theme** — the ☀ / 🌙 button in the top bar toggles a light theme; your
   choice is remembered and applied with no flash on reload.
+
+### Bulk paste
+
+Song lists are usually written as prose, not data, so a line can carry three things: a
+label that isn't part of the song, the song, and the artist. **☰ Bulk** takes them as they
+come:
+
+```
+Bridesmaid entrance song - Con Gai Mien Tay by Luong Khanh Vy
+Groomsman entrance song - Mr Strong Man by George Lam
+2. Katy Perry - Teenage Dream
+https://open.spotify.com/playlist/…
+```
+
+It parses each line and shows you the result **before** downloading — artist and title in
+editable boxes, with any dropped label struck through — so a mis-read line costs a
+keystroke instead of a wrong file. Numbering, bullets, blank lines and `#` comments are
+ignored.
+
+Label stripping only engages when a line has **both** a label separator and an artist
+(`… - X by Y`). That's what stops an ordinary `Artist - Title` list from having its artists
+mistaken for labels. The toggle overrides the guess either way, and the preview updates live.
+
+The whole list runs as **one job**, not one per line: a single progress view, the library
+index built once, shared concurrency, and one review report listing anything that couldn't
+be matched confidently.
+
+**Search** picks where song *names* are looked up:
+
+| Option | Searches |
+|---|---|
+| **Auto** (default) | YouTube Music, YouTube and SoundCloud — best scoring match wins |
+| **YouTube only** | YouTube Music + YouTube |
+| **SoundCloud only** | SoundCloud |
+
+> Spotify isn't a search option. Anonymous tokens are refused (`429 QUOTA_EXCEEDED`) and it
+> serves no audio, so it can only ever be a *link* source — pasted Spotify links in the box
+> still resolve through Spotify as normal.
+
+Pasted links are queued as their own jobs, so a playlist URL still resolves as a playlist
+rather than being flattened into one search.
 
 ### Spotify match quality
 
