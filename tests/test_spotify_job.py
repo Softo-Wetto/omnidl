@@ -151,7 +151,7 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
                        return_value=Resolved("playlist", "Test", [Track("Artist", "Song", 180)])), \
                  patch.object(manager, "_fetch_track", side_effect=fetch), \
                  patch("app.jobs.asyncio.sleep", side_effect=no_sleep):
-                await manager._run_spotify_job(job)
+                await manager._run_tracklist_job(job)
 
         self.assertEqual(2, calls["n"])            # tried again after the burst
         self.assertEqual("done", job.status)

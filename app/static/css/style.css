@@ -665,3 +665,47 @@ html.light .duplicate-file { background: rgba(255,255,255,.45); }
   .settings-preview { grid-template-columns: 1fr; }
   .settings-preview-note { grid-column: 1; }
 }
+
+/* ---------------- bulk paste ---------------- */
+/* Wider than a normal modal: the preview shows an artist/title pair per line, and
+   squeezing those into the default width makes long titles unreadable. */
+.bulk-modal-box { width: min(820px, 96vw); }
+#bulk-text {
+  width: 100%; resize: vertical; min-height: 120px;
+  padding: 10px 12px; border-radius: 10px;
+  background: var(--bg-2); color: var(--text);
+  border: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px; line-height: 1.6;
+}
+#bulk-text:focus { outline: none; border-color: var(--accent); }
+
+.bulk-preview { display: flex; flex-direction: column; gap: 6px; max-height: 300px; overflow-y: auto; }
+.bulk-preview:not(:empty) { padding: 8px; border: 1px solid var(--border-soft); border-radius: 10px; background: var(--bg-2); }
+.bulk-row { display: flex; align-items: center; gap: 8px; }
+.bulk-row input {
+  flex: 1 1 0; min-width: 0; padding: 5px 8px; font-size: 12.5px;
+  border-radius: 7px; border: 1px solid transparent;
+  background: var(--panel); color: var(--text);
+}
+.bulk-row input:hover { border-color: var(--border); }
+.bulk-row input:focus { outline: none; border-color: var(--accent); }
+.bulk-tag {
+  flex: 0 0 auto; font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
+  padding: 3px 7px; border-radius: 999px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+}
+.bulk-tag.link { color: var(--accent); }
+.bulk-dash { color: var(--dim); flex: 0 0 auto; }
+.bulk-url { flex: 1; min-width: 0; font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The stripped label is shown, not hidden: it's the one thing the parser guessed at. */
+.bulk-label {
+  flex: 0 0 auto; max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 11px; color: var(--dim); text-decoration: line-through;
+}
+
+@media (max-width: 560px) {
+  .bulk-row { flex-wrap: wrap; }
+  .bulk-row input { flex: 1 1 140px; }
+  .bulk-label { max-width: 100%; }
+}

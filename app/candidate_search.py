@@ -71,10 +71,27 @@ def search_ytdlp(query: str, prefix: str, source: str) -> list[Candidate]:
     return candidates_from_ytdlp(info.get("entries") or [], source)
 
 
-def search_all(artist: str, title: str) -> list[Candidate]:
+# Which searches each user-facing service runs. "auto" casts the widest net and lets the
+# scorer decide; the others exist so a deliberate choice isn't quietly overridden by a
+# better-scoring hit somewhere else. Spotify is absent on purpose: it has no usable public
+# search (anonymous tokens are refused with 429 QUOTA_EXCEEDED) and serves no audio, so it
+# can only ever be a *link* source, never a search one.
+SERVICE_SOURCES: dict[str, tuple[str, ...]] = {
+    "auto": ("youtube_music", "youtube", "soundcloud"),
+    "youtube": ("youtube_music", "youtube"),
+    "soundcloud": ("soundcloud",),
+}
+
+
+def search_all(artist: str, title: str, service: str = "auto") -> list[Candidate]:
+    """Search every source the chosen service covers, newest-first by relevance."""
+    wanted = SERVICE_SOURCES.get(service) or SERVICE_SOURCES["auto"]
     query = f"{artist} - {title}".strip(" -")
-    return [
-        *search_ytmusic(artist, title),
-        *search_ytdlp(query, "ytsearch", "youtube"),
-        *search_ytdlp(query, "scsearch", "soundcloud"),
-    ]
+    found: list[Candidate] = []
+    if "youtube_music" in wanted:
+        found += search_ytmusic(artist, title)
+    if "youtube" in wanted:
+        found += search_ytdlp(query, "ytsearch", "youtube")
+    if "soundcloud" in wanted:
+        found += search_ytdlp(query, "scsearch", "soundcloud")
+    return found

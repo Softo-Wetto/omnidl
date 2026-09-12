@@ -127,3 +127,29 @@ def decide_match(artist: str, title: str, duration: int, candidate: Candidate) -
         accepted=reason == "verified match",
         reason=reason,
     )
+
+
+# SoundCloud (and some YouTube uploads) serve a ~30s preview for licensed tracks. It matches
+# the artist and title perfectly, so it outscores the genuine recording and downloads a file
+# that looks like a success and is useless as a song.
+_PREVIEW_MAX_SECONDS = 70
+_FULL_LENGTH_MIN_SECONDS = 90
+
+
+def is_preview_clip(decisions, expected_duration: int = 0):
+    """Return a predicate marking candidates that are short preview clips.
+
+    Only applies when the real duration is unknown — which is exactly the pasted-song-name
+    case, since typed text carries no metadata. When a duration IS known the existing
+    ±window already rejects previews, so this stays out of the way.
+
+    A short candidate is only judged a preview when a full-length alternative actually
+    exists; otherwise the song genuinely is short (an interlude, a skit) and refusing it
+    would mean downloading nothing at all.
+    """
+    if expected_duration:
+        return lambda decision: False
+    durations = [d.candidate.duration for d in decisions if d.candidate.duration]
+    if not any(d >= _FULL_LENGTH_MIN_SECONDS for d in durations):
+        return lambda decision: False
+    return lambda decision: 0 < decision.candidate.duration <= _PREVIEW_MAX_SECONDS

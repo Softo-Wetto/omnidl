@@ -648,6 +648,119 @@ async function saveSettings() {
 function openSettings() { loadSettingsForm(); $("#settings-modal").classList.remove("hidden"); }
 function closeSettings() { $("#settings-modal").classList.add("hidden"); }
 
+/* ---------------- bulk paste ---------------- */
+// Parsing happens on the server so the preview and the download can never disagree.
+// This only renders what came back and sends back whatever the user edited.
+let bulkTimer = null;
+let bulkTouched = false;   // once the toggle is used, stop letting auto-detect move it
+
+function openBulk() { $("#bulk-modal").classList.remove("hidden"); $("#bulk-text").focus(); }
+function closeBulk() { $("#bulk-modal").classList.add("hidden"); }
+
+function bulkRows() {
+  return [...document.querySelectorAll("#bulk-preview .bulk-row")].map((row) => ({
+    kind: row.dataset.kind,
+    url: row.dataset.url || "",
+    artist: (row.querySelector(".bulk-artist") || {}).value || "",
+    title: (row.querySelector(".bulk-title") || {}).value || "",
+  }));
+}
+
+function renderBulkPreview(data) {
+  const host = $("#bulk-preview");
+  host.innerHTML = "";
+  const s = data.summary || {};
+  const bits = [];
+  if (s.searches) bits.push(`${s.searches} song${s.searches === 1 ? "" : "s"}`);
+  if (s.urls) bits.push(`${s.urls} link${s.urls === 1 ? "" : "s"}`);
+  $("#bulk-summary").textContent = bits.length
+    ? bits.join(" · ") + (data.capped ? ` — capped at ${data.max_lines}` : "")
+    : "Nothing to download yet.";
+  $("#do-bulk").textContent = s.total ? `Download ${s.total}` : "Download";
+  $("#do-bulk").disabled = !s.total;
+  if (!bulkTouched) $("#bulk-strip").checked = !!data.strip_labels;
+
+  // Built with DOM calls, not innerHTML: these strings are pasted by the user (often from
+  // someone else's message) and a title containing a quote would otherwise break out of a
+  // value="..." attribute.
+  const el = (tag, cls, text) => {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+  const input = (cls, value, placeholder) => {
+    const n = document.createElement("input");
+    n.className = cls;
+    n.value = value || "";
+    n.placeholder = placeholder;
+    return n;
+  };
+
+  for (const e of data.entries || []) {
+    const row = el("div", "bulk-row");
+    row.dataset.kind = e.kind;
+    row.dataset.url = e.url || "";
+    if (e.kind === "url") {
+      row.append(el("span", "bulk-tag link", "link"));
+      const u = el("span", "bulk-url", e.url);
+      u.title = e.url;
+      row.append(u);
+    } else {
+      // Editable, because a mis-parsed line should cost one keystroke to fix — not a
+      // wrong file on disk.
+      row.append(el("span", "bulk-tag", "song"),
+                 input("bulk-artist", e.artist, "artist"),
+                 el("span", "bulk-dash", "–"),
+                 input("bulk-title", e.title, "title"));
+      if (e.label) {
+        const tag = el("span", "bulk-label", e.label);
+        tag.title = "Ignored label";
+        row.append(tag);
+      }
+    }
+    host.append(row);
+  }
+}
+
+async function refreshBulkPreview() {
+  const text = $("#bulk-text").value;
+  if (!text.trim()) { renderBulkPreview({ entries: [], summary: {} }); return; }
+  const body = { text };
+  if (bulkTouched) body.strip_labels = $("#bulk-strip").checked;
+  const data = await api("/api/bulk/preview", "POST", body);
+  if (data && data.error) { $("#bulk-summary").textContent = data.error; return; }
+  renderBulkPreview(data);
+}
+
+function queueBulkPreview() {
+  clearTimeout(bulkTimer);
+  bulkTimer = setTimeout(refreshBulkPreview, 250);
+}
+
+async function doBulkDownload() {
+  const entries = bulkRows().filter((r) => r.kind === "url" || r.artist.trim() || r.title.trim());
+  if (!entries.length) return;
+  $("#do-bulk").disabled = true;
+  $("#bulk-status").textContent = "Queueing…";
+  const res = await api("/api/bulk/download", "POST", {
+    entries, service: $("#bulk-service").value,
+    name: $("#bulk-name").value.trim(), format: $("#format").value,
+  });
+  $("#bulk-status").textContent = "";
+  $("#do-bulk").disabled = false;
+  if (res && res.needs_unlock) { closeBulk(); openUnlock(); return; }
+  if (res && res.error) { toast(res.error, "error", 6000); return; }
+  const parts = [];
+  if (res.tracks) parts.push(`${res.tracks} song${res.tracks === 1 ? "" : "s"}`);
+  if (res.links) parts.push(`${res.links} link${res.links === 1 ? "" : "s"}`);
+  toast(`Queued · ${parts.join(" + ")}`, "success");
+  closeBulk();
+  $("#bulk-text").value = "";
+  bulkTouched = false;
+  renderBulkPreview({ entries: [], summary: {} });
+}
+
 /* ---------------- music library ---------------- */
 const ISSUE_LABELS = {
   unreadable: "Unreadable",
@@ -904,6 +1017,13 @@ function bind() {
   };
   $("#do-unlock").onclick = doUnlock;
   $("#close-unlock").onclick = closeUnlock;
+  $("#open-bulk").onclick = openBulk;
+  $("#close-bulk").onclick = closeBulk;
+  $("#do-bulk").onclick = doBulkDownload;
+  $("#bulk-text").addEventListener("input", queueBulkPreview);
+  $("#bulk-service").addEventListener("change", queueBulkPreview);
+  $("#bulk-strip").addEventListener("change", () => { bulkTouched = true; refreshBulkPreview(); });
+  $("#bulk-modal").addEventListener("click", (e) => { if (e.target.id === "bulk-modal") closeBulk(); });
   $("#unlock-input").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
   $("#unlock-modal").addEventListener("click", (e) => { if (e.target.id === "unlock-modal") closeUnlock(); });
   $("#settings-modal").addEventListener("click", (e) => { if (e.target.id === "settings-modal") closeSettings(); });

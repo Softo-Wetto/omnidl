@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import candidate_search, engines
 from .library import build_library_index
-from .matching import MatchDecision, decide_match, title_is_plausible
+from .matching import MatchDecision, decide_match, is_preview_clip, title_is_plausible
 from .review_report import TrackOutcome, write_review_report
 from . import settings as settings_mod
 from .settings import DOWNLOAD_ROOT, FILE_TTL_SECONDS, PROJECT_ROOT, load_settings
@@ -169,13 +169,18 @@ class ToolOutputFormatter:
 class Job:
     def __init__(self, input_text: str, engine: str, argv: list[str] | None,
                  display_cmd: str, *, spotify_url: str | None = None,
+                 tracks: list | None = None, list_name: str = "",
                  settings: dict | None = None, session: str = "", ip: str = ""):
         self.id = uuid.uuid4().hex[:12]
         self.input = input_text
         self.engine = engine
-        self.argv = argv                 # None => resolver job (see _run_spotify_job)
+        self.argv = argv                 # None => track-list job (see _run_tracklist_job)
         self.display_cmd = display_cmd
         self.spotify_url = spotify_url
+        # A bulk paste arrives with its track list already parsed, so there is nothing
+        # to resolve; list_name is what the review report and header are titled with.
+        self.tracks = tracks
+        self.list_name = list_name
         self.settings = settings or {}
         self.session = session           # owning visitor; scopes visibility + files
         self.ip = ip                     # client address, for per-IP abuse limits
@@ -382,42 +387,26 @@ class JobManager:
         return None
 
     # ----- submission ----------------------------------------------------
-    async def submit(self, input_text: str, settings_dict: dict, session: str,
-                     engine_override: str | None = None, ip: str = "") -> Job:
-        s = dict(settings_dict)
-        if engine_override in engines.ENGINES:
-            engine = engine_override
-        else:
-            engine = engines.detect_engine(input_text, s)
-
-        job = Job(input_text, engine, None, "", session=session, settings=s, ip=ip)
+    @staticmethod
+    def _prepare_out_dir(job: Job, s: dict, session: str) -> None:
+        """Point this job's downloads at the right folder for the deployment mode."""
         if settings_mod.LOCAL_MODE:
             # Personal mode: write straight to the user's configured folder. out_dir stays
             # None so nothing here is ever auto-deleted (it's the user's library).
             out_dir = Path(s.get("output_dir") or DOWNLOAD_ROOT)
-            try:
-                out_dir.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                pass
-            s["output_dir"] = str(out_dir)
         else:
             # Hosted mode: each job gets its own isolated folder, so we know exactly which
             # files it produced and can hand only those to the visitor who created it.
             out_dir = DOWNLOAD_ROOT / session / job.id
-            try:
-                out_dir.mkdir(parents=True, exist_ok=True)
-            except OSError:
-                pass
             job.out_dir = out_dir
-            s["output_dir"] = str(out_dir)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        s["output_dir"] = str(out_dir)
 
-        if engine == "spotify" and s.get("spotify_method", "embed") == "embed":
-            job.spotify_url = input_text
-            job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
-        else:
-            job.argv = engines.build_command(engine, input_text, s)
-            job.display_cmd = engines.describe_command(job.argv)
-
+    async def _enqueue(self, job: Job, session: str, ip: str) -> Job:
+        """Register a built job, count it against the abuse limits, and queue it."""
         self.jobs[job.id] = job
         self.order.append(job.id)
         now = time.time()
@@ -428,6 +417,44 @@ class JobManager:
         await self._send(job, {"type": "job_added", "job": job.to_dict()})
         self._persist()
         return job
+
+    async def submit_bulk(self, tracks: list, settings_dict: dict, session: str,
+                          service: str = "auto", list_name: str = "",
+                          ip: str = "") -> Job:
+        """Queue a pasted song list as ONE job.
+
+        Deliberately one job rather than one per line: the whole point of pasting a list is
+        that it behaves like a playlist — a single progress view, one library index built
+        once, shared concurrency, and one review report naming whatever could not be matched.
+        """
+        s = dict(settings_dict)
+        s["bulk_service"] = service if service in candidate_search.SERVICE_SOURCES else "auto"
+        name = list_name.strip() or "Pasted list"
+        job = Job(f"{name} ({len(tracks)} tracks)", "youtube", None, "",
+                  tracks=tracks, list_name=name, session=session, settings=s, ip=ip)
+        self._prepare_out_dir(job, s, session)
+        job.display_cmd = f"search {s['bulk_service']} for {len(tracks)} pasted track(s)"
+        return await self._enqueue(job, session, ip)
+
+    async def submit(self, input_text: str, settings_dict: dict, session: str,
+                     engine_override: str | None = None, ip: str = "") -> Job:
+        s = dict(settings_dict)
+        if engine_override in engines.ENGINES:
+            engine = engine_override
+        else:
+            engine = engines.detect_engine(input_text, s)
+
+        job = Job(input_text, engine, None, "", session=session, settings=s, ip=ip)
+        self._prepare_out_dir(job, s, session)
+
+        if engine == "spotify" and s.get("spotify_method", "embed") == "embed":
+            job.spotify_url = input_text
+            job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
+        else:
+            job.argv = engines.build_command(engine, input_text, s)
+            job.display_cmd = engines.describe_command(job.argv)
+
+        return await self._enqueue(job, session, ip)
 
     async def cancel(self, job_id: str, session: str) -> bool:
         job = self.jobs.get(job_id)
@@ -592,7 +619,7 @@ class JobManager:
         await self._send(job, {"type": "status", "job": job.to_dict()})
         try:
             if job.argv is None:
-                await self._run_spotify_job(job)
+                await self._run_tracklist_job(job)
             else:
                 await self._emit(job, f"\r\n\x1b[1;36m$ {job.display_cmd}\x1b[0m\r\n")
                 job.code = await self._stream_subprocess(job, job.argv)
@@ -616,17 +643,31 @@ class JobManager:
             await self._send(job, {"type": "status", "job": job.to_dict()})
             self._persist()
 
-    async def _run_spotify_job(self, job: Job) -> None:
-        """Resolve Spotify metadata, then download only strict external matches."""
+    async def _run_tracklist_job(self, job: Job) -> None:
+        """Download a list of known tracks, taking only strict external matches.
+
+        Two things produce that list: resolving a Spotify link, or parsing a pasted block
+        of song names. Everything downstream of the list — scoring, the right-song gate,
+        skip-existing, the retry sweep, the review report — is identical, so it lives here
+        once instead of being reimplemented per source.
+        """
         from . import spotify_resolver as sr
 
         settings = job.settings or load_settings()
-        await self._emit(job, "\r\n\x1b[1;36m\U0001f50e Resolving Spotify link...\x1b[0m \x1b[2m(no API - no Premium)\x1b[0m\r\n")
-        resolved = await asyncio.to_thread(sr.resolve, job.spotify_url)
-        tracks = resolved.tracks
-        total = len(tracks)
-        await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
-        if getattr(resolved, "truncated", False):
+        if job.tracks is not None:
+            tracks = job.tracks
+            total = len(tracks)
+            where = {"auto": "all services", "youtube": "YouTube",
+                     "soundcloud": "SoundCloud"}.get(settings.get("bulk_service", "auto"), "all services")
+            resolved = None
+            await self._emit(job, f"\r\n\x1b[1;32m\U0001f4cb {job.list_name or 'Pasted list'}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} (searching {where})\x1b[0m\r\n")
+        else:
+            await self._emit(job, "\r\n\x1b[1;36m\U0001f50e Resolving Spotify link...\x1b[0m \x1b[2m(no API - no Premium)\x1b[0m\r\n")
+            resolved = await asyncio.to_thread(sr.resolve, job.spotify_url)
+            tracks = resolved.tracks
+            total = len(tracks)
+            await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
+        if resolved is not None and getattr(resolved, "truncated", False):
             # Spotify's embed tops out at 100 and its API refused the rest, so this is the
             # first 100 of a larger playlist. Say so unmistakably rather than let the run
             # look like a complete playlist.
@@ -716,7 +757,8 @@ class JobManager:
 
             report_path: Path | None = None
             if unresolved:
-                report_path = await self._emit_review_report(job, Path(settings["output_dir"]), resolved.name, unresolved)
+                list_title = resolved.name if resolved is not None else (job.list_name or "Pasted list")
+                report_path = await self._emit_review_report(job, Path(settings["output_dir"]), list_title, unresolved)
             job.progress = 100
             job.code = 0 if counts["fail"] == 0 else 1
             job.status = "done" if (counts["ok"] + counts["skip"]) > 0 or total == 0 else "error"
@@ -779,11 +821,18 @@ class JobManager:
 
         try:
             await status("\x1b[2m?? searching sources...\x1b[0m")
-            candidates = await asyncio.to_thread(candidate_search.search_all, track.artist, track.title)
+            candidates = await asyncio.to_thread(
+                candidate_search.search_all, track.artist, track.title,
+                settings.get("bulk_service", "auto"))
             decisions = [decide_match(track.artist, track.title, track.duration, c) for c in candidates]
+            # A 30s preview matches artist and title perfectly, so it outscores the real
+            # recording. Push those below everything else before score is even considered —
+            # a file that looks downloaded but is 30 seconds long is worse than a retry.
+            preview = is_preview_clip(decisions, track.duration)
             # Highest score wins; tie-break: reliable source, then artist, title, closeness.
             decisions.sort(
                 key=lambda d: (
+                    not preview(d),
                     d.accepted,
                     d.score,
                     _SOURCE_RANK.get(d.candidate.source, 0),

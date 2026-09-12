@@ -17,7 +17,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from . import engines, library, sessions, settings as settings_mod
+from . import bulk_input, engines, library, sessions, settings as settings_mod
+from . import spotify_resolver as sr
 from .jobs import JobManager
 
 # Per-session UI preferences (in-memory). Visitors only ever change these — never the
@@ -371,6 +372,96 @@ async def download(request: Request, payload: dict):
     override = payload.get("engine_override") or None
     job = await manager.submit(text, s, sid, override, ip=ip)
     return job.to_dict()
+
+
+# A pasted list is capped so one paste can't become an unbounded download run. Local use is
+# your own machine and your own bandwidth, so the ceiling there is far higher.
+BULK_MAX_LINES = 500 if settings_mod.LOCAL_MODE else 100
+
+
+@app.post("/api/bulk/preview")
+async def bulk_preview(payload: dict):
+    """Parse pasted text without downloading anything.
+
+    Parsing runs server-side so the preview and the download agree exactly — a second
+    implementation in JavaScript would eventually disagree with this one, and the whole
+    point of the preview is that what you see is what gets searched.
+    """
+    text = payload.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return JSONResponse({"error": "nothing pasted"}, status_code=400)
+    strip = payload.get("strip_labels")
+    entries = bulk_input.parse_bulk(text, strip if isinstance(strip, bool) else None)
+    capped = len(entries) > BULK_MAX_LINES
+    entries = entries[:BULK_MAX_LINES]
+    return {
+        "entries": [
+            {"raw": e.raw, "kind": e.kind, "artist": e.artist, "title": e.title,
+             "url": e.url, "label": e.label, "query": e.query}
+            for e in entries
+        ],
+        "summary": bulk_input.summarise(entries),
+        "capped": capped,
+        "max_lines": BULK_MAX_LINES,
+        # Report what auto-detection decided, so the toggle shows the real state.
+        "strip_labels": any(e.label for e in entries) if strip is None else bool(strip),
+    }
+
+
+@app.post("/api/bulk/download")
+async def bulk_download(request: Request, payload: dict):
+    """Queue an edited song list: one track-list job, plus a job per pasted link."""
+    raw_entries = payload.get("entries")
+    if not isinstance(raw_entries, list) or not raw_entries:
+        return JSONResponse({"error": "nothing to download"}, status_code=400)
+    if not _unlocked(request):
+        # Every text line becomes a YouTube search, so bulk always spends the operator's
+        # cookies — gate it exactly like a single YouTube download.
+        return JSONResponse(
+            {"error": "Bulk downloads search YouTube, so they need the access passphrase.",
+             "needs_unlock": True},
+            status_code=403,
+        )
+    sid = _sid(request)
+    ip = _client_ip(request)
+    limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
+    if limit:
+        return JSONResponse({"error": limit}, status_code=429)
+
+    s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
+    if payload.get("format"):
+        s["audio_format"] = payload["format"]
+    service = payload.get("service") or "auto"
+
+    tracks, urls = [], []
+    for item in raw_entries[:BULK_MAX_LINES]:
+        if not isinstance(item, dict):
+            continue
+        if item.get("kind") == "url":
+            url = (item.get("url") or "").strip()
+            if url:
+                urls.append(url)
+            continue
+        artist = (item.get("artist") or "").strip()
+        title = (item.get("title") or "").strip()
+        if not (artist or title):
+            continue
+        tracks.append(sr.Track(artist=artist, title=title,
+                               artists=[artist] if artist else []))
+    if not tracks and not urls:
+        return JSONResponse({"error": "nothing usable in that list"}, status_code=400)
+
+    jobs = []
+    if tracks:
+        jobs.append(await manager.submit_bulk(
+            tracks, s, sid, service=service,
+            list_name=(payload.get("name") or "").strip(), ip=ip))
+    # Links are their own thing: a pasted playlist URL should still resolve as a playlist
+    # rather than be flattened into a single search.
+    for url in urls:
+        jobs.append(await manager.submit(url, dict(s), sid, ip=ip))
+    return {"jobs": [j.to_dict() for j in jobs],
+            "tracks": len(tracks), "links": len(urls)}
 
 
 @app.get("/api/jobs")
