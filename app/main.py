@@ -374,13 +374,21 @@ async def download(request: Request, payload: dict):
     return job.to_dict()
 
 
-# A pasted list is capped so one paste can't become an unbounded download run. Local use is
-# your own machine and your own bandwidth, so the ceiling there is far higher.
-BULK_MAX_LINES = 500 if settings_mod.LOCAL_MODE else 100
+# A pasted list is capped so one visitor can't turn one paste into an unbounded download
+# run. Your own machine — or your own server, as the owner — is your bandwidth to spend, so
+# the ceiling only binds strangers.
+BULK_MAX_OWNER = 500
+BULK_MAX_VISITOR = 100
+
+
+def _bulk_max(request: Request) -> int:
+    if settings_mod.LOCAL_MODE or _tier(request) == "owner":
+        return BULK_MAX_OWNER
+    return BULK_MAX_VISITOR
 
 
 @app.post("/api/bulk/preview")
-async def bulk_preview(payload: dict):
+async def bulk_preview(request: Request, payload: dict):
     """Parse pasted text without downloading anything.
 
     Parsing runs server-side so the preview and the download agree exactly — a second
@@ -391,9 +399,10 @@ async def bulk_preview(payload: dict):
     if not isinstance(text, str) or not text.strip():
         return JSONResponse({"error": "nothing pasted"}, status_code=400)
     strip = payload.get("strip_labels")
+    max_lines = _bulk_max(request)
     entries = bulk_input.parse_bulk(text, strip if isinstance(strip, bool) else None)
-    capped = len(entries) > BULK_MAX_LINES
-    entries = entries[:BULK_MAX_LINES]
+    capped = len(entries) > max_lines
+    entries = entries[:max_lines]
     return {
         "entries": [
             {"raw": e.raw, "kind": e.kind, "artist": e.artist, "title": e.title,
@@ -402,7 +411,7 @@ async def bulk_preview(payload: dict):
         ],
         "summary": bulk_input.summarise(entries),
         "capped": capped,
-        "max_lines": BULK_MAX_LINES,
+        "max_lines": max_lines,
         # Report what auto-detection decided, so the toggle shows the real state.
         "strip_labels": any(e.label for e in entries) if strip is None else bool(strip),
     }
@@ -434,7 +443,7 @@ async def bulk_download(request: Request, payload: dict):
     service = payload.get("service") or "auto"
 
     tracks, urls = [], []
-    for item in raw_entries[:BULK_MAX_LINES]:
+    for item in raw_entries[:_bulk_max(request)]:
         if not isinstance(item, dict):
             continue
         if item.get("kind") == "url":
