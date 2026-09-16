@@ -46,6 +46,49 @@ class PlainListTests(unittest.TestCase):
                              "First dance - Shanghai Bund by Frances Yip")
         self.assertEqual("Katy Perry", entries[0].artist)
         self.assertEqual("Tame Impala", entries[2].artist)
+        # ...and the labelled line is still cleaned: each line is judged on its own. This
+        # used to be decided for the whole paste, so it kept "First dance - " in its title.
+        self.assertEqual(("Shanghai Bund", "First dance"), (entries[3].title, entries[3].label))
+
+    def test_a_line_parses_the_same_whatever_is_pasted_with_it(self):
+        line = "First dance - Shanghai Bund by Frances Yip"
+        alone = parse_bulk(line)[0]
+        among_plain = parse_bulk("Katy Perry - Teenage Dream\nBruno Mars - Treasure\n" + line)[2]
+        self.assertEqual((alone.artist, alone.title, alone.label),
+                         (among_plain.artist, among_plain.title, among_plain.label))
+
+    def test_a_version_suffix_is_part_of_the_title_not_a_label(self):
+        """Stripping these searched for songs literally called "Single Edit" and "Live"."""
+        cases = {
+            "Black Betty - Single Edit by Spiderbait": "Black Betty - Single Edit",
+            "Mr Brightside - Live by The Killers": "Mr Brightside - Live",
+            "Bohemian Rhapsody - Remastered 2011 by Queen": "Bohemian Rhapsody - Remastered 2011",
+        }
+        for line, title in cases.items():
+            with self.subTest(line=line):
+                entry = parse_bulk(line)[0]
+                self.assertEqual((title, ""), (entry.title, entry.label))
+
+    def test_a_label_in_front_of_a_suffixed_title_is_still_removed(self):
+        entry = parse_bulk("First dance - Black Betty - Single Edit by Spiderbait")[0]
+        self.assertEqual(("Black Betty - Single Edit", "First dance"), (entry.title, entry.label))
+
+    def test_autocorrected_dashes_split_like_hyphens(self):
+        """Phones and Word turn " - " into an en or em dash; those lines weren't split at all."""
+        for line in ("Katy Perry – Teenage Dream", "Katy Perry — Teenage Dream"):
+            with self.subTest(line=line):
+                entry = parse_bulk(line)[0]
+                self.assertEqual(("Katy Perry", "Teenage Dream"), (entry.artist, entry.title))
+
+    def test_a_hyphen_inside_a_name_is_not_a_separator(self):
+        entry = parse_bulk("Jay-Z - Empire State Of Mind")[0]
+        self.assertEqual(("Jay-Z", "Empire State Of Mind"), (entry.artist, entry.title))
+
+    def test_wrapping_quotes_are_removed_but_apostrophes_kept(self):
+        entries = parse_bulk('"Shanghai Bund" by Frances Yip\n'
+                             "“Mr Strong Man” by George Lam\n"
+                             "Nothin' On You by B.o.B")
+        self.assertEqual(["Shanghai Bund", "Mr Strong Man", "Nothin' On You"], [e.title for e in entries])
 
     def test_by_is_split_on_the_last_occurrence(self):
         """"Stand By Me" contains "by"; only the final one separates the artist."""

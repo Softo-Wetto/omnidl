@@ -14,12 +14,13 @@ import time
 import uuid
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from . import candidate_search, engines
+from . import bulk_input, candidate_search, engines
 from .library import build_library_index
-from .matching import MatchDecision, decide_match, is_preview_clip, title_is_plausible
+from .matching import MatchDecision, choose, same_recording
 from .review_report import TrackOutcome, write_review_report
 from . import settings as settings_mod
 from .settings import DOWNLOAD_ROOT, FILE_TTL_SECONDS, PROJECT_ROOT, load_settings
+from .spotify_resolver import Track
 
 # How many jobs run concurrently. Each job may itself spawn several track downloads, so
 # keep this modest; tune with OMNIDL_WORKERS for your host. (Was effectively 1.)
@@ -50,9 +51,31 @@ _HISTORY_OUTPUT_CAP = 12_000
 # Cap how much output we retain per job for reconnect/replay (characters).
 _OUTPUT_CAP = 200_000
 
-# Preferred download sources on score ties (YouTube is far more reliably fetchable than
-# SoundCloud search hits, which often aren't downloadable).
-_SOURCE_RANK = {"youtube_music": 3, "youtube": 2, "soundcloud": 1}
+_SERVICE_NAMES = {"auto": "all services", "youtube": "YouTube", "soundcloud": "SoundCloud"}
+# What the queue calls a job. A typed song isn't "YouTube" any more — it can come from any service.
+_KIND_LABELS = {"search": "Song search", "bulk": "Bulk list"}
+
+# The useful part of a failed yt-dlp run, for the terminal and the review report. In parallel
+# mode the output is otherwise drained unread, which left "unavailable" with no way to tell a
+# transient 403 from a region block or a deleted upload.
+_ERROR_PATTERNS = (
+    (re.compile(r"sign in to confirm", re.I), "YouTube bot check - cookies needed"),
+    (re.compile(r"HTTP Error \d{3}[^\n]*", re.I), None),
+    (re.compile(r"video unavailable", re.I), "video unavailable"),
+    (re.compile(r"not available in your country|geo.?restrict", re.I), "region blocked"),
+    (re.compile(r"private video", re.I), "private video"),
+)
+
+
+def _short_error(lines: list[str]) -> str:
+    text = "\n".join(lines)
+    for pattern, label in _ERROR_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return label or match.group(0).strip()[:60]
+    last = lines[-1] if lines else ""
+    return last.replace("ERROR:", "").strip()[:80]
+
 
 # Progress / current-item parsing (works across yt-dlp, spotdl, scdl).
 _PCT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
@@ -169,7 +192,7 @@ class ToolOutputFormatter:
 class Job:
     def __init__(self, input_text: str, engine: str, argv: list[str] | None,
                  display_cmd: str, *, spotify_url: str | None = None,
-                 tracks: list | None = None, list_name: str = "",
+                 tracks: list | None = None, list_name: str = "", kind: str = "",
                  settings: dict | None = None, session: str = "", ip: str = ""):
         self.id = uuid.uuid4().hex[:12]
         self.input = input_text
@@ -181,6 +204,10 @@ class Job:
         # to resolve; list_name is what the review report and header are titled with.
         self.tracks = tracks
         self.list_name = list_name
+        # "search" (typed song), "bulk" (pasted list), "spotify", or "command" (a raw link run
+        # through a downloader). Retry depends on it: re-running a pasted list by its display
+        # text would search YouTube for the words "Wedding songs (3 tracks)".
+        self.kind = kind or ("spotify" if spotify_url else "command")
         self.settings = settings or {}
         self.session = session           # owning visitor; scopes visibility + files
         self.ip = ip                     # client address, for per-IP abuse limits
@@ -214,8 +241,9 @@ class Job:
         return {
             "id": self.id,
             "input": self.input,
+            "kind": self.kind,
             "engine": self.engine,
-            "engine_label": meta["label"],
+            "engine_label": _KIND_LABELS.get(self.kind, meta["label"]),
             "tool": meta["tool"],
             "status": self.status,
             "code": self.code,
@@ -236,14 +264,29 @@ class Job:
         rec = self.to_dict()
         rec["output"] = self.output[-_HISTORY_OUTPUT_CAP:]
         rec["spotify_url"] = self.spotify_url
+        rec["list_name"] = self.list_name
+        rec["bulk_service"] = self.settings.get("bulk_service")
+        # The list itself, so a pasted list can be retried after a restart.
+        rec["tracks"] = ([{"artist": t.artist, "title": t.title, "artists": list(t.artists),
+                           "duration": t.duration} for t in self.tracks]
+                         if self.tracks is not None else None)
         rec["session"] = self.session
         rec["out_dir"] = str(self.out_dir) if self.out_dir else None
         return rec
 
     @classmethod
     def from_record(cls, rec: dict) -> "Job":
+        tracks = rec.get("tracks")
+        kind = rec.get("kind") or ""
+        if not kind and not rec.get("spotify_url") and re.search(r"\(\d+ tracks?\)$", rec.get("input", "")):
+            kind = "bulk"      # saved before lists were persisted: known to be a list, list lost
         job = cls(rec.get("input", ""), rec.get("engine", "youtube"), None, "",
-                  spotify_url=rec.get("spotify_url"), session=rec.get("session", ""))
+                  spotify_url=rec.get("spotify_url"), session=rec.get("session", ""),
+                  tracks=[Track(artist=t.get("artist", ""), title=t.get("title", ""),
+                                artists=list(t.get("artists") or []),
+                                duration=int(t.get("duration") or 0)) for t in tracks]
+                  if tracks is not None else None,
+                  list_name=rec.get("list_name") or "", kind=kind)
         if rec.get("out_dir"):
             job.out_dir = Path(rec["out_dir"])
         job.id = rec.get("id", job.id)
@@ -264,6 +307,7 @@ class Job:
             "media_type": rec.get("media_type", "audio"),
             "video_quality": rec.get("video_quality"),
             "audio_format": rec.get("audio_format"),
+            "bulk_service": rec.get("bulk_service") or "auto",
         }
         return job
 
@@ -420,8 +464,8 @@ class JobManager:
 
     async def submit_bulk(self, tracks: list, settings_dict: dict, session: str,
                           service: str = "auto", list_name: str = "",
-                          ip: str = "") -> Job:
-        """Queue a pasted song list as ONE job.
+                          ip: str = "", input_text: str = "", kind: str = "bulk") -> Job:
+        """Queue a list of songs as ONE job — a pasted list, or a single typed song.
 
         Deliberately one job rather than one per line: the whole point of pasting a list is
         that it behaves like a playlist — a single progress view, one library index built
@@ -429,16 +473,58 @@ class JobManager:
         """
         s = dict(settings_dict)
         s["bulk_service"] = service if service in candidate_search.SERVICE_SOURCES else "auto"
+        s["media_type"] = "audio"          # matching a song is an audio operation
         name = list_name.strip() or "Pasted list"
-        job = Job(f"{name} ({len(tracks)} tracks)", "youtube", None, "",
-                  tracks=tracks, list_name=name, session=session, settings=s, ip=ip)
+        count = f"{len(tracks)} track{'s' if len(tracks) != 1 else ''}"
+        job = Job(input_text or f"{name} ({count})", "youtube", None, "",
+                  tracks=tracks, list_name=name, kind=kind, session=session, settings=s, ip=ip)
         self._prepare_out_dir(job, s, session)
-        job.display_cmd = f"search {s['bulk_service']} for {len(tracks)} pasted track(s)"
+        job.display_cmd = f"match {count} on {_SERVICE_NAMES[s['bulk_service']]}"
         return await self._enqueue(job, session, ip)
+
+    async def retry(self, job_id: str, session: str, settings_dict: dict, ip: str = "") -> Job | str:
+        """Re-run a job exactly as it was asked for. Returns the new job, or an error message.
+
+        Mode (audio/video, format, quality, search service) comes from the original job, not
+        from whatever the toolbar happens to be set to now; everything else — output folder,
+        naming — comes from current settings, as a fresh download would.
+        """
+        old = self.jobs.get(job_id)
+        if old is None or (not settings_mod.LOCAL_MODE and old.session != session):
+            return "That job no longer exists."
+        s = dict(settings_dict)
+        for field in ("media_type", "video_quality", "audio_format"):
+            if old.settings.get(field):
+                s[field] = old.settings[field]
+        if old.kind in ("bulk", "search"):
+            if not old.tracks:
+                return ("This list was saved before OmniDL kept lists with their jobs, so it "
+                        "can't be retried — paste it into Bulk again.")
+            return await self.submit_bulk(
+                list(old.tracks), s, session, service=old.settings.get("bulk_service") or "auto",
+                list_name=old.list_name, ip=ip,
+                input_text=old.input if old.kind == "search" else "", kind=old.kind)
+        if old.kind == "spotify":
+            return await self.submit(old.spotify_url or old.input, s, session, "spotify", ip=ip)
+        return await self.submit(old.input, s, session, old.engine, ip=ip)
 
     async def submit(self, input_text: str, settings_dict: dict, session: str,
                      engine_override: str | None = None, ip: str = "") -> Job:
         s = dict(settings_dict)
+        text = input_text.strip()
+        # A typed song is matched exactly like a playlist track or a pasted line. It used to
+        # be handed to yt-dlp as "ytsearch1:" — YouTube's #1 result — which is a different
+        # algorithm: it mostly returned the music video (intros, skits, live cuts), and it
+        # was why one song and many songs could come back as different versions. Video mode
+        # still searches YouTube directly, since there the video is what's wanted.
+        if (text and not engines.is_url(text) and s.get("media_type", "audio") != "video"):
+            entries = [e for e in bulk_input.parse_bulk(text) if e.kind == "search"]
+            if entries:
+                e = entries[0]
+                track = Track(artist=e.artist, title=e.title, artists=[e.artist] if e.artist else [])
+                service = {"youtube": "youtube", "soundcloud": "soundcloud"}.get(engine_override or "", "auto")
+                return await self.submit_bulk([track], s, session, service=service,
+                                              list_name=text, ip=ip, input_text=text, kind="search")
         if engine_override in engines.ENGINES:
             engine = engine_override
         else:
@@ -449,6 +535,7 @@ class JobManager:
 
         if engine == "spotify" and s.get("spotify_method", "embed") == "embed":
             job.spotify_url = input_text
+            job.kind = "spotify"
             job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
         else:
             job.argv = engines.build_command(engine, input_text, s)
@@ -560,10 +647,11 @@ class JobManager:
         return changed
 
     async def _stream_subprocess(self, job: Job, argv: list[str], emit: bool = True,
-                                 progress_cb=None) -> int:
+                                 progress_cb=None, errors: list[str] | None = None) -> int:
         """Run one subprocess. emit=True streams formatted output live. Otherwise the output
         is drained silently, but if progress_cb is given the latest download %/stage is
         parsed and passed to it (used for the live per-track line in parallel mode).
+        If `errors` is given, the tool's ERROR lines are collected into it in every mode.
         Returns the exit code."""
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -571,32 +659,46 @@ class JobManager:
             stderr=asyncio.subprocess.STDOUT,
         )
         job.procs.add(proc)
+        pending = [""]
+
+        def collect(text: str, final: bool = False) -> None:
+            if errors is None:
+                return
+            lines = (pending[0] + text).split("\n")
+            pending[0] = "" if final else lines.pop()
+            errors.extend(line.strip() for line in lines if "ERROR" in line)
+            del errors[:-10]    # a few recent lines are plenty
+
         try:
             assert proc.stdout is not None
+            decoder = codecs.getincrementaldecoder("utf-8")("replace")
             if emit:
-                decoder = codecs.getincrementaldecoder("utf-8")("replace")
                 formatter = ToolOutputFormatter()
                 while True:
                     chunk = await proc.stdout.read(4096)
                     if not chunk:
                         tail = decoder.decode(b"", final=True)
+                        collect(tail, final=True)
                         if tail and (formatted := formatter.feed(tail)):
                             await self._emit(job, formatted)
                         if flushed := formatter.flush():
                             await self._emit(job, flushed)
                         break
-                    if (text := decoder.decode(chunk)) and (formatted := formatter.feed(text)):
+                    text = decoder.decode(chunk)
+                    collect(text)
+                    if text and (formatted := formatter.feed(text)):
                         await self._emit(job, formatted)
             elif progress_cb is not None:
-                decoder = codecs.getincrementaldecoder("utf-8")("replace")
                 last = None
                 while True:
                     chunk = await proc.stdout.read(4096)
                     if not chunk:
+                        collect(decoder.decode(b"", final=True), final=True)
                         break
                     text = decoder.decode(chunk)
                     if not text:
                         continue
+                    collect(text)
                     info = None
                     pcts = _PCT_RE.findall(text)
                     if pcts:
@@ -607,8 +709,9 @@ class JobManager:
                         last = info
                         await progress_cb(info)
             else:
-                while await proc.stdout.read(8192):
-                    pass
+                while chunk := await proc.stdout.read(8192):
+                    collect(decoder.decode(chunk))
+                collect(decoder.decode(b"", final=True), final=True)
             return await proc.wait()
         finally:
             job.procs.discard(proc)
@@ -657,8 +760,7 @@ class JobManager:
         if job.tracks is not None:
             tracks = job.tracks
             total = len(tracks)
-            where = {"auto": "all services", "youtube": "YouTube",
-                     "soundcloud": "SoundCloud"}.get(settings.get("bulk_service", "auto"), "all services")
+            where = _SERVICE_NAMES.get(settings.get("bulk_service", "auto"), "all services")
             resolved = None
             await self._emit(job, f"\r\n\x1b[1;32m\U0001f4cb {job.list_name or 'Pasted list'}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} (searching {where})\x1b[0m\r\n")
         else:
@@ -743,11 +845,12 @@ class JobManager:
                         outcomes[i] = retry
 
         if job.status != "cancelled":
-            counts = {"ok": 0, "skip": 0, "fail": 0}
+            counts = {"ok": 0, "review": 0, "skip": 0, "fail": 0}
             unresolved: list[TrackOutcome] = []
             for outcome in outcomes.values():
                 if outcome.status in ("downloaded", "downloaded_for_review"):
                     counts["ok"] += 1
+                    counts["review"] += outcome.status == "downloaded_for_review"
                 elif outcome.status == "skipped":
                     counts["skip"] += 1
                 else:
@@ -764,7 +867,10 @@ class JobManager:
             job.status = "done" if (counts["ok"] + counts["skip"]) > 0 or total == 0 else "error"
             bar = "-" * 40
             report_suffix = f"\x1b[2m report={report_path}\x1b[0m" if report_path else ""
-            await self._emit(job, f"\r\n\x1b[36m{bar}\x1b[0m\r\n\x1b[1;32m\U00002705 {counts['ok']} downloaded\x1b[0m \x1b[2m-\x1b[0m \x1b[33m{counts['skip']} skipped\x1b[0m \x1b[2m-\x1b[0m \x1b[31m{counts['fail']} needs review\x1b[0m \x1b[2m({total} total)\x1b[0m{report_suffix}\r\n\x1b[36m{bar}\x1b[0m\r\n")
+            # "Needs review" used to count failures, so a run where every track was saved for
+            # review reported "0 needs review" beside a review report listing all of them.
+            review_note = f" \x1b[33m({counts['review']} to review)\x1b[0m" if counts["review"] else ""
+            await self._emit(job, f"\r\n\x1b[36m{bar}\x1b[0m\r\n\x1b[1;32m\U00002705 {counts['ok']} downloaded\x1b[0m{review_note} \x1b[2m-\x1b[0m \x1b[33m{counts['skip']} skipped\x1b[0m \x1b[2m-\x1b[0m \x1b[31m{counts['fail']} failed\x1b[0m \x1b[2m({total} total)\x1b[0m{report_suffix}\r\n\x1b[36m{bar}\x1b[0m\r\n")
 
     async def _emit_review_report(self, job: Job, output_dir: Path, playlist_name: str, outcomes: list[TrackOutcome]) -> Path | None:
         if not outcomes:
@@ -779,19 +885,33 @@ class JobManager:
 
     async def _fetch_track(self, job: Job, track, settings: dict, detailed: bool,
                            index: int, total: int) -> TrackOutcome:
-        """Download the best external candidate and flag non-exact choices for review.
+        """Download the right version of one track and flag anything not verified for review.
+
+        Every entry point — a Spotify playlist, a pasted list, a typed search — lands here, so
+        a song is chosen the same way however it was asked for.
 
         Detailed mode (concurrency 1) streams the full yt-dlp output live. Parallel mode
         shows ONE line per track that updates in place (search -> %, -> saved), so any
         number of concurrent tracks stay live and readable without interleaving.
         """
+        # A bare phrase ("drake one dance") has no artist to match on. Name the song first;
+        # if nothing can be named it may not be a song at all, which is handled below.
+        phrase = track.title if not track.artist else ""
+        if phrase:
+            named = await asyncio.to_thread(candidate_search.resolve_phrase, phrase)
+            if named:
+                artists, title = named
+                track = Track(artist=artists[0], title=title, artists=artists)
+                phrase = ""
+
         out_dir = Path(settings["output_dir"])
         ext = settings.get("audio_format", "opus")
         basename = track.filename_for(settings.get("naming_order", "artist-title"),
                                       settings.get("naming_artists", "all"))
         target = out_dir / f"{basename}.{ext}"
         key = f"t{index}"
-        label = f"\x1b[1;36m[{index}/{total}]\x1b[0m \x1b[1m{track.artist} - {track.title}\x1b[0m"
+        shown = f"{track.artist} - {track.title}" if track.artist else track.title
+        label = f"\x1b[1;36m[{index}/{total}]\x1b[0m \x1b[1m{shown}\x1b[0m"
 
         async def status(state: str, store: bool = False) -> None:
             """Detailed mode: append a line. Parallel mode: update this track's one line."""
@@ -805,12 +925,36 @@ class JobManager:
                 await self._key_done(job, key)
             return outcome
 
+        async def download(url: str, source: str, what: str) -> tuple[bool, str]:
+            """Fetch one URL, retrying the same candidate. Returns (ok, last error)."""
+            async def progress(info: str) -> None:
+                await status(f"\x1b[36m? {info} \x1b[2m({source})\x1b[0m")
+
+            why = ""
+            for attempt in range(1, _DL_ATTEMPTS + 1):
+                if job.status == "cancelled":
+                    return False, "cancelled"
+                suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
+                await status(f"\x1b[2m? trying {source} ({what}){suffix}...\x1b[0m")
+                errors: list[str] = []
+                code = await self._stream_subprocess(
+                    job, engines.media_url_command(url, basename, settings),
+                    emit=detailed, progress_cb=None if detailed else progress, errors=errors)
+                self._cleanup_sidecars(out_dir, basename, ext)
+                if code == 0 and target.exists():
+                    return True, ""
+                why = _short_error(errors) or f"exit code {code}"
+                if attempt < _DL_ATTEMPTS and job.status != "cancelled":
+                    await status(f"\x1b[2m{source} hiccup ({why}) - retrying...\x1b[0m")
+                    await asyncio.sleep(_DL_BACKOFF * attempt)
+            return False, why
+
         if detailed:
             await self._emit(job, f"\r\n{label}\r\n")
         if settings.get("skip_existing", True) and target.exists():
             await status("\x1b[33m? already downloaded\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "skipped", "output file already exists", []))
-        if settings.get("skip_existing", True) and settings.get("_library_index"):
+        if settings.get("skip_existing", True) and settings.get("_library_index") and track.artist:
             existing = settings["_library_index"].find(track.artist, track.title, track.duration)
             if existing is not None:
                 relative = existing.relative_path
@@ -820,80 +964,74 @@ class JobManager:
                 ))
 
         try:
+            if phrase:
+                # Not identifiable as a song (a mix, a podcast, a vague phrase). Do what a
+                # YouTube search does — take its top result — but never call it verified,
+                # and keep the upload's own tags rather than inventing song metadata.
+                ok, why = await download(f"ytsearch1:{phrase}", "youtube", "top search result")
+                if job.status == "cancelled":
+                    return await finish(TrackOutcome(track, "cancelled", "job cancelled", []))
+                if not ok:
+                    await status(f"\x1b[31m? couldn't download ({why}); added to review\x1b[0m", store=True)
+                    return await finish(TrackOutcome(
+                        track, "download_failed", f"no song identified; search download failed ({why})", []))
+                await status(f"\x1b[33m? saved for review\x1b[0m \x1b[2m{target.name} "
+                             f"(no song identified - YouTube's top result)\x1b[0m", store=True)
+                return await finish(TrackOutcome(
+                    track, "downloaded_for_review",
+                    "no song could be identified from this text, so YouTube's top result was saved",
+                    [], saved_as=target.name))
+
             await status("\x1b[2m?? searching sources...\x1b[0m")
             candidates = await asyncio.to_thread(
                 candidate_search.search_all, track.artist, track.title,
                 settings.get("bulk_service", "auto"))
-            decisions = [decide_match(track.artist, track.title, track.duration, c) for c in candidates]
-            # A 30s preview matches artist and title perfectly, so it outscores the real
-            # recording. Push those below everything else before score is even considered —
-            # a file that looks downloaded but is 30 seconds long is worse than a retry.
-            preview = is_preview_clip(decisions, track.duration)
-            # Highest score wins; tie-break: reliable source, then artist, title, closeness.
-            decisions.sort(
-                key=lambda d: (
-                    not preview(d),
-                    d.accepted,
-                    d.score,
-                    _SOURCE_RANK.get(d.candidate.source, 0),
-                    d.artist_similarity, d.title_similarity,
-                    -(d.duration_difference if d.duration_difference is not None else 9999),
-                ),
-                reverse=True,
+            choice = choose(
+                track.artist, track.title, track.duration, candidates,
+                prefer_ytmusic=settings.get("prefer_ytmusic", True),
+                use_duration=settings.get("spotify_match_duration", True),
             )
+            decisions = choice.decisions
             if not decisions:
                 await status("\x1b[33m?? no source found; added to review report\x1b[0m", store=True)
                 return await finish(TrackOutcome(track, "no_candidate", "no external candidates found", []))
 
-            # Only ever download a candidate that plausibly IS this song. A high score
-            # alone isn't enough: a same-artist, same-length but totally different track
-            # must never be saved just because the real one was unavailable.
-            eligible = [d for d in decisions
-                        if d.accepted or title_is_plausible(track.title, d.candidate.title)]
-
-            # Try eligible candidates best-first; fall back to the next when a download
-            # fails (SoundCloud results in particular are often not actually fetchable).
+            # Only ever download a candidate that is this song AND this version (see choose()).
+            # If the best one won't download, only the same recording may stand in for it:
+            # under load the right version can fail and succeed a minute later, and taking
+            # "the next plausible candidate" instead quietly saved a different edit that no
+            # retry ever corrected. Failing here hands the track to the retry sweep instead.
+            reference = choice.eligible[0] if choice.eligible else None
+            stand_ins = [d for d in choice.eligible
+                         if d is reference or same_recording(d, reference)][:5]
             selected = None
             attempts: list[MatchDecision] = []
-            for decision in eligible[:5]:
+            last_error = ""
+            for decision in stand_ins:
                 if job.status == "cancelled":
                     return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
                 cand = decision.candidate
-
-                async def progress(info: str, _c=cand) -> None:
-                    await status(f"\x1b[36m? {info} \x1b[2m({_c.source})\x1b[0m")
-
-                # Retry the same candidate before moving on (transient YouTube throttling).
-                ok = False
-                for attempt in range(1, _DL_ATTEMPTS + 1):
-                    if job.status == "cancelled":
-                        return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
-                    suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
-                    await status(f"\x1b[2m? trying {cand.source} (score {decision.score}/100){suffix}...\x1b[0m")
-                    code = await self._stream_subprocess(
-                        job, engines.media_url_command(cand.url, basename, settings),
-                        emit=detailed, progress_cb=None if detailed else progress)
-                    self._cleanup_sidecars(out_dir, basename, ext)
-                    if code == 0 and target.exists():
-                        ok = True
-                        break
-                    if attempt < _DL_ATTEMPTS and job.status != "cancelled":
-                        await status(f"\x1b[2m{cand.source} hiccup - retrying...\x1b[0m")
-                        await asyncio.sleep(_DL_BACKOFF * attempt)
+                what = "verified match" if decision.accepted else f"score {decision.score}/100"
+                ok, why = await download(cand.url, cand.source, what)
                 if ok:
                     selected = decision
                     break
+                if job.status == "cancelled":
+                    break
                 attempts.append(decision)
-                tag = "verified match" if decision.accepted else f"score {decision.score}/100"
-                await status(f"\x1b[2m{cand.source} ({tag}) unavailable - trying next source\x1b[0m")
+                last_error = why
+                await status(f"\x1b[2m{cand.source} ({what}) unavailable: {why} - "
+                             f"trying the same recording elsewhere\x1b[0m")
 
             if job.status == "cancelled":
                 return await finish(TrackOutcome(track, "cancelled", "job cancelled", decisions[:5]))
             if selected is None:
                 if attempts:
-                    msg, reason = "all matching sources failed to download", "all candidate downloads failed"
+                    msg = f"the right version wouldn't download ({last_error})"
+                    reason = f"all candidate downloads failed ({last_error})"
                 else:
-                    msg, reason = "no confident match found (skipped to avoid a wrong song)", "no confident match available"
+                    msg = "no confident match found (skipped to avoid a wrong version)"
+                    reason = "no confident match available"
                 await status(f"\x1b[31m? {msg}; added to review\x1b[0m", store=True)
                 return await finish(TrackOutcome(
                     track, "download_failed", reason,
@@ -901,7 +1039,6 @@ class JobManager:
                 ))
 
             await asyncio.to_thread(self._tag, target, track)
-            review_reason = "verified match" if selected.accepted else selected.reason
             result = "downloaded" if selected.accepted else "downloaded_for_review"
             tail = f"\x1b[2m{target.name} ({selected.candidate.source}, {selected.score}/100)\x1b[0m"
             if selected.accepted:
@@ -910,7 +1047,7 @@ class JobManager:
                 await status(f"\x1b[33m? saved for review\x1b[0m {tail}", store=True)
             return await finish(TrackOutcome(
                 track, result,
-                "verified match" if selected.accepted else review_reason,
+                "verified match" if selected.accepted else selected.reason,
                 decisions[:5], selected=selected, saved_as=target.name,
                 failed_attempts=tuple(attempts),
             ))

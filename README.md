@@ -67,7 +67,10 @@ python run.py
   - `open.spotify.com` / `spotify:` → **Embed scrape → yt-dlp** (per track)
   - `youtube.com` / `youtu.be` → **yt-dlp**
   - `soundcloud.com` → **scdl**
-- **Type a search** (no URL) — routed to a **yt-dlp** YouTube search.
+- **Type a song** (no URL) — matched exactly like a playlist track or a Bulk line, so one song
+  and many songs come back as the same version. `Artist - Title`, `Title by Artist` and loose
+  phrases like `drake one dance` all work. In **Video** mode typed text is a YouTube video
+  search instead. See [How a song is matched](#how-a-song-is-matched).
 - **☰ Bulk** — paste a whole list, one song per line, and download it as a single job.
   See [Bulk paste](#bulk-paste).
 - Use the **engine dropdown** to force a specific tool, and the **format dropdown** for a
@@ -108,9 +111,13 @@ editable boxes, with any dropped label struck through — so a mis-read line cos
 keystroke instead of a wrong file. Numbering, bullets, blank lines and `#` comments are
 ignored.
 
-Label stripping only engages when a line has **both** a label separator and an artist
-(`… - X by Y`). That's what stops an ordinary `Artist - Title` list from having its artists
-mistaken for labels. The toggle overrides the guess either way, and the preview updates live.
+Labels are judged **line by line**, so a line parses the same way whatever it's pasted with.
+A label is only removed from a line that names its artist with `by` (`… - X by Y`), which is
+what stops an ordinary `Artist - Title` list from having its artists mistaken for labels. Parts
+that belong to the title stay: `Black Betty - Single Edit by Spiderbait` keeps "Single Edit",
+`Mr Brightside - Live by The Killers` keeps "Live". Dashes that phones and Word autocorrect
+(`–`, `—`) split like hyphens, and quotes around a title are dropped. Untick **Ignore labels**
+to keep every line exactly as written.
 
 The whole list runs as **one job**, not one per line: a single progress view, the library
 index built once, shared concurrency, and one review report listing anything that couldn't
@@ -129,7 +136,43 @@ be matched confidently.
 > still resolve through Spotify as normal.
 
 Pasted links are queued as their own jobs, so a playlist URL still resolves as a playlist
-rather than being flattened into one search.
+rather than being flattened into one search. Each is held to the same download limits as a
+link pasted on its own.
+
+A SoundCloud-only list needs no access passphrase, the same as a single SoundCloud link.
+**↻ Retry** re-runs the list itself (it's saved with the job, so this works after a restart
+too) rather than searching for the job's display name.
+
+### How a song is matched
+
+Every song — a Spotify playlist track, a Bulk line, or a typed search — goes through the
+same matcher. That's deliberate: typed searches used to take YouTube's #1 result instead,
+which usually meant the music video (intros, skits, sometimes a live cut), so the same song
+could come back as a different version depending on how you asked for it.
+
+1. **Search** YouTube Music (official audio), YouTube and SoundCloud.
+2. **Score** each result on artist, title and length. Credits and upload decorations don't
+   count against a match — `Payphone (feat. Wiz Khalifa)`, `Drake - One Dance (Lyrics)` and
+   `Justin Bieber, Nicki Minaj – Beauty And A Beat` all name the song — and the artist is read
+   from the title when a lyrics or fan channel uploaded it.
+3. **Exclude other versions.** Sped up, slowed, reverb, nightcore, 8D, live, acoustic,
+   instrumental, karaoke, covers, remixes/radio mixes, extended edits, loops and 30-second
+   previews are never downloaded unless the song you asked for is itself that version.
+4. **Check the length.** A Spotify track has an exact length; anything more than 20s off is a
+   different edit. A typed song has no length, so the uploads *vote*: the length most copies
+   agree on (weighted towards each service's top results) becomes the reference.
+5. **Download the best match.** If it won't download — YouTube throttles busy downloads — only
+   the *same recording* from another source may stand in (verified if the choice was, and
+   within 10s of it). Otherwise the track fails *and is retried* after the rest, one at a time.
+   Saving a different version just because the right one was busy is what made playlists
+   unreliable before.
+
+On 80 real songs checked against Spotify's own lengths, the right version was chosen for
+80/80 playlist tracks, 79/80 bulk lines and 79–80/80 typed searches (previously 78, 76 and
+45), and all three paths picked the identical upload for 74 of them.
+
+The two matching switches in **Settings** apply to all of this: **Prefer YouTube Music**
+(official audio wins ties) and **Match result to track length** (step 4).
 
 ### Spotify match quality
 
@@ -139,10 +182,11 @@ A Spotify link resolves to a track list, then each track is matched to the clean
 2. **YouTube search**.
 3. **SoundCloud search**.
 
-Every candidate is scored against the Spotify title, primary artist, and duration. OmniDL
-prefers a strict match, then downloads the highest-scoring available candidate when no exact
-match exists. Non-exact selections are explicitly marked for review rather than presented as
-verified matches. Tracks with no external candidate still remain undownloaded.
+Every candidate is scored against the Spotify title, artist, and duration — see
+[How a song is matched](#how-a-song-is-matched). OmniDL prefers a verified match; a plausible
+non-exact one of the right version is downloaded but marked for review rather than presented
+as verified. A different version is never downloaded, and tracks with no safe candidate stay
+undownloaded and are listed in the review report.
 
 OmniDL writes an `omnidl-review-*.html` report in the output directory for every non-exact
 selection and every unavailable/failed track. It contains candidates, scores, reasons, and

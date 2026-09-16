@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
-from . import bulk_input, engines, library, sessions, settings as settings_mod
+from . import bulk_input, candidate_search, engines, library, sessions, settings as settings_mod
 from . import spotify_resolver as sr
 from .jobs import JobManager
 
@@ -339,23 +339,55 @@ async def library_repair(payload: dict):
     except OSError as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)
 
+_TEXT_SERVICES = {"youtube": "youtube", "soundcloud": "soundcloud"}
+
+
+def _needs_account(text: str, service: str = "auto") -> bool:
+    """Would downloading this spend the operator's YouTube account?
+
+    YouTube-backed downloads use the operator's cookies, so they're gated when a passphrase
+    is configured; everything cookie-free stays open. It's keyed on the input and, for typed
+    text, on where it will be searched — one rule for single downloads, pasted lists and
+    retries alike, so the same request is never allowed one way and refused another.
+    """
+    if engines.is_url(text):
+        return engines.needs_youtube_account(text)
+    return service != "soundcloud"
+
+
+def _locked(what: str = "YouTube and Spotify downloads") -> JSONResponse:
+    return JSONResponse(
+        {"error": f"{what} need the access passphrase. SoundCloud links and "
+                  "SoundCloud-only searches work without it.",
+         "needs_unlock": True},
+        status_code=403,
+    )
+
+
+def _apply_mode(s: dict, payload: dict) -> None:
+    """Take the per-request mode fields, but only valid values.
+
+    Unchecked, a bulk list sent from Video mode arrived with "1080p" as its *audio* format,
+    and every track then failed to convert.
+    """
+    if payload.get("format") in settings_mod.AUDIO_FORMATS:
+        s["audio_format"] = payload["format"]
+    if payload.get("media_type") in ("audio", "video"):
+        s["media_type"] = payload["media_type"]
+    if payload.get("video_quality") in settings_mod.VIDEO_QUALITIES:
+        s["video_quality"] = payload["video_quality"]
+
+
 @app.post("/api/download")
 async def download(request: Request, payload: dict):
     text = (payload.get("input") or "").strip()
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
-    # YouTube-backed downloads spend the operator's cookies, so they're gated when a
-    # passphrase is configured. Everything cookie-free (SoundCloud, direct links, other
-    # yt-dlp sites) stays open to anyone.
-    if engines.needs_youtube_account(text) and not _unlocked(request):
-        return JSONResponse(
-            {
-                "error": "YouTube and Spotify downloads need the access passphrase. "
-                         "SoundCloud links and direct media links work without it.",
-                "needs_unlock": True,
-            },
-            status_code=403,
-        )
+    override = payload.get("engine_override") or None
+    video = payload.get("media_type") == "video"
+    service = "youtube" if video else _TEXT_SERVICES.get(override or "", "auto")
+    if _needs_account(text, service) and not _unlocked(request):
+        return _locked()
 
     sid = _sid(request)
     ip = _client_ip(request)
@@ -363,13 +395,7 @@ async def download(request: Request, payload: dict):
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
     s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
-    if payload.get("format"):
-        s["audio_format"] = payload["format"]
-    if payload.get("media_type"):
-        s["media_type"] = payload["media_type"]
-    if payload.get("video_quality"):
-        s["video_quality"] = payload["video_quality"]
-    override = payload.get("engine_override") or None
+    _apply_mode(s, payload)
     job = await manager.submit(text, s, sid, override, ip=ip)
     return job.to_dict()
 
@@ -398,9 +424,12 @@ async def bulk_preview(request: Request, payload: dict):
     text = payload.get("text")
     if not isinstance(text, str) or not text.strip():
         return JSONResponse({"error": "nothing pasted"}, status_code=400)
-    strip = payload.get("strip_labels")
+    # The toggle means "remove labels where a line has one" (decided per line) or "never".
+    # Forcing it on would strip genuine title parts ("Black Betty - Single Edit"), so only
+    # an explicit false is honoured.
+    strip = False if payload.get("strip_labels") is False else None
     max_lines = _bulk_max(request)
-    entries = bulk_input.parse_bulk(text, strip if isinstance(strip, bool) else None)
+    entries = bulk_input.parse_bulk(text, strip)
     capped = len(entries) > max_lines
     entries = entries[:max_lines]
     return {
@@ -412,8 +441,7 @@ async def bulk_preview(request: Request, payload: dict):
         "summary": bulk_input.summarise(entries),
         "capped": capped,
         "max_lines": max_lines,
-        # Report what auto-detection decided, so the toggle shows the real state.
-        "strip_labels": any(e.label for e in entries) if strip is None else bool(strip),
+        "strip_labels": strip is None,
     }
 
 
@@ -423,24 +451,8 @@ async def bulk_download(request: Request, payload: dict):
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         return JSONResponse({"error": "nothing to download"}, status_code=400)
-    if not _unlocked(request):
-        # Every text line becomes a YouTube search, so bulk always spends the operator's
-        # cookies — gate it exactly like a single YouTube download.
-        return JSONResponse(
-            {"error": "Bulk downloads search YouTube, so they need the access passphrase.",
-             "needs_unlock": True},
-            status_code=403,
-        )
-    sid = _sid(request)
-    ip = _client_ip(request)
-    limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
-    if limit:
-        return JSONResponse({"error": limit}, status_code=429)
-
-    s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
-    if payload.get("format"):
-        s["audio_format"] = payload["format"]
-    service = payload.get("service") or "auto"
+    service = payload.get("service")
+    service = service if service in candidate_search.SERVICE_SOURCES else "auto"
 
     tracks, urls = [], []
     for item in raw_entries[:_bulk_max(request)]:
@@ -459,18 +471,62 @@ async def bulk_download(request: Request, payload: dict):
                                artists=[artist] if artist else []))
     if not tracks and not urls:
         return JSONResponse({"error": "nothing usable in that list"}, status_code=400)
+    # Same rule as a single download: a SoundCloud-only list or SoundCloud links don't touch
+    # the operator's YouTube account, so they don't need the passphrase.
+    if not _unlocked(request) and (
+        (tracks and _needs_account("", service)) or any(_needs_account(u) for u in urls)
+    ):
+        return _locked("YouTube and Spotify searches")
 
-    jobs = []
+    sid = _sid(request)
+    ip = _client_ip(request)
+    owner = _tier(request) == "owner"
+    limit = manager.check_limit(sid, ip, unlimited=owner)
+    if limit:
+        return JSONResponse({"error": limit}, status_code=429)
+    s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
+    _apply_mode(s, {"format": payload.get("format")})
+
+    jobs, held_back = [], 0
     if tracks:
         jobs.append(await manager.submit_bulk(
             tracks, s, sid, service=service,
             list_name=(payload.get("name") or "").strip(), ip=ip))
     # Links are their own thing: a pasted playlist URL should still resolve as a playlist
-    # rather than be flattened into a single search.
+    # rather than be flattened into a single search. Each becomes its own job, so each is
+    # held to the same limits as a link pasted on its own — otherwise one paste of 100 links
+    # was 100 jobs past a 3-at-a-time cap.
     for url in urls:
+        if manager.check_limit(sid, ip, unlimited=owner):
+            held_back += 1
+            continue
         jobs.append(await manager.submit(url, dict(s), sid, ip=ip))
-    return {"jobs": [j.to_dict() for j in jobs],
-            "tracks": len(tracks), "links": len(urls)}
+    return {"jobs": [j.to_dict() for j in jobs], "tracks": len(tracks),
+            "links": len(urls) - held_back, "links_held_back": held_back}
+
+
+@app.post("/api/jobs/{job_id}/retry")
+async def retry_job(request: Request, job_id: str):
+    """Re-run a job faithfully. The browser only knows a job's display text — for a pasted
+    list that's "Wedding songs (3 tracks)", which it used to search YouTube for."""
+    sid = _sid(request)
+    old = manager.jobs.get(job_id)
+    if old is None or (not settings_mod.LOCAL_MODE and old.session != sid):
+        return JSONResponse({"error": "That job no longer exists."}, status_code=404)
+    if old.kind in ("bulk", "search"):
+        gated = _needs_account("", old.settings.get("bulk_service") or "auto")
+    else:
+        gated = _needs_account(old.spotify_url or old.input)
+    if gated and not _unlocked(request):
+        return _locked()
+    ip = _client_ip(request)
+    limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
+    if limit:
+        return JSONResponse({"error": limit}, status_code=429)
+    result = await manager.retry(job_id, sid, settings_mod.effective_settings(SESSION_PREFS.get(sid)), ip=ip)
+    if isinstance(result, str):
+        return JSONResponse({"error": result}, status_code=400)
+    return result.to_dict()
 
 
 @app.get("/api/jobs")

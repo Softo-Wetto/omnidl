@@ -219,11 +219,20 @@ function updateChip() {
     hint.textContent = "";
     return;
   }
-  chip.className = "chip " + engine;
   const wantsVideo = state.mediaType === "video" && videoSupported(engine);
-  let tool = engine === "spotify" ? "embed → yt-dlp" : ENGINE_TOOL[engine];
-  if (wantsVideo) tool += " · video";
-  chip.textContent = `${ENGINE_LABEL[engine]} · ${tool}`;
+  // Typed text in audio mode is matched as a song across services (the same matcher as
+  // playlists and Bulk), not handed to one tool — say so instead of "YouTube · yt-dlp".
+  const songSearch = !isLink(text) && state.mediaType !== "video";
+  if (songSearch) {
+    const where = { auto: "all services", youtube: "YouTube", soundcloud: "SoundCloud" }[textService()];
+    chip.className = "chip " + (textService() === "auto" ? "youtube" : textService());
+    chip.textContent = `Song search · ${where}`;
+  } else {
+    chip.className = "chip " + engine;
+    let tool = engine === "spotify" ? "embed → yt-dlp" : ENGINE_TOOL[engine];
+    if (wantsVideo) tool += " · video";
+    chip.textContent = `${ENGINE_LABEL[engine]} · ${tool}`;
+  }
   if (gateBlocks(text)) {
     hint.innerHTML = '🔒 YouTube &amp; Spotify need the access passphrase — ' +
                      '<a href="#" id="hint-unlock" style="color:var(--accent)">unlock</a>. ' +
@@ -232,10 +241,12 @@ function updateChip() {
     if (a) a.onclick = (e) => { e.preventDefault(); state.pendingInput = text.trim(); openUnlock(); };
   } else if (wantsVideo) {
     hint.textContent = `Full video → ${$("#format").value} (${state.settings.video_container || "mp4"}).`;
+  } else if (songSearch && override === "spotify") {
+    hint.textContent = "Spotify can't be searched by text, so this searches all services.";
+  } else if (songSearch) {
+    hint.textContent = "Finds the studio version — the same match a playlist or Bulk list would get.";
   } else if (engine === "spotify") {
     hint.textContent = "Via public embed — no Spotify API, no Premium, no login needed.";
-  } else if (engine === "soundcloud" && override !== "auto" && !text.toLowerCase().includes("soundcloud.com")) {
-    hint.textContent = "scdl needs a SoundCloud URL (it can't search by text).";
   } else {
     hint.textContent = "";
   }
@@ -393,22 +404,19 @@ function downloadPayload(input, override) {
     payload.media_type = "video";
     payload.video_quality = $("#format").value;
   } else {
-    payload.format = $("#format").value;
+    // Said explicitly: the server routes typed text by mode (audio = song match).
+    payload.media_type = "audio";
+    payload.format = audioFormat();
   }
   return payload;
 }
 
-function retryJob(job) {
-  // Reproduce the original job's mode (audio vs video + format/quality), not the
-  // current toggle state.
-  const payload = { input: job.input, engine_override: job.engine };
-  if (job.media_type === "video" && videoSupported(job.engine)) {
-    payload.media_type = "video";
-    if (job.video_quality) payload.video_quality = job.video_quality;
-  } else if (job.audio_format) {
-    payload.format = job.audio_format;
-  }
-  api("/api/download", "POST", payload);
+async function retryJob(job) {
+  // Done on the server, which knows what the job really was. Re-sending the display text
+  // re-ran a pasted list as a YouTube search for "Wedding songs (3 tracks)".
+  const res = await api(`/api/jobs/${job.id}/retry`, "POST");
+  if (res && res.needs_unlock) { openUnlock(); return; }
+  if (res && res.error) { toast(res.error, "error", 6000); return; }
   toast(`Re-queued: ${job.input}`, "info");
 }
 
@@ -516,17 +524,30 @@ async function api(path, method = "GET", body) {
 
 /* ---------------- access gate (hosted, YouTube/Spotify only) ---------------- */
 // Mirrors engines.needs_youtube_account() so the UI can warn before submitting.
-function needsUnlock(text) {
+function isLink(text) {
+  const t = (text || "").trim().toLowerCase();
+  return /^https?:\/\//.test(t) || t.startsWith("spotify:");
+}
+
+// Where typed text is searched: the engine dropdown picks a service, Video mode always
+// searches YouTube. Mirrors _TEXT_SERVICES / _needs_account on the server.
+function textService() {
+  if (state.mediaType === "video") return "youtube";
+  return { youtube: "youtube", soundcloud: "soundcloud" }[$("#engine").value] || "auto";
+}
+
+function needsUnlock(text, service = textService()) {
   const t = (text || "").trim().toLowerCase();
   if (!t) return false;
   if (t.includes("youtube.com") || t.includes("youtu.be")) return true;
   if (t.includes("open.spotify.com") || t.startsWith("spotify:")) return true;
   if (t.includes("soundcloud.com")) return false;
-  return !/^https?:\/\//.test(t);          // bare search -> YouTube search
+  if (isLink(t)) return false;
+  return service !== "soundcloud";          // a SoundCloud-only search never touches YouTube
 }
 
-function gateBlocks(text) {
-  return state.meta.gated && !state.meta.unlocked && needsUnlock(text);
+function gateBlocks(text, service) {
+  return state.meta.gated && !state.meta.unlocked && needsUnlock(text, service);
 }
 
 function openUnlock() {
@@ -652,7 +673,6 @@ function closeSettings() { $("#settings-modal").classList.add("hidden"); }
 // Parsing happens on the server so the preview and the download can never disagree.
 // This only renders what came back and sends back whatever the user edited.
 let bulkTimer = null;
-let bulkTouched = false;   // once the toggle is used, stop letting auto-detect move it
 
 function openBulk() { $("#bulk-modal").classList.remove("hidden"); $("#bulk-text").focus(); }
 function closeBulk() { $("#bulk-modal").classList.add("hidden"); }
@@ -678,7 +698,6 @@ function renderBulkPreview(data) {
     : "Nothing to download yet.";
   $("#do-bulk").textContent = s.total ? `Download ${s.total}` : "Download";
   $("#do-bulk").disabled = !s.total;
-  if (!bulkTouched) $("#bulk-strip").checked = !!data.strip_labels;
 
   // Built with DOM calls, not innerHTML: these strings are pasted by the user (often from
   // someone else's message) and a title containing a quote would otherwise break out of a
@@ -727,7 +746,9 @@ async function refreshBulkPreview() {
   const text = $("#bulk-text").value;
   if (!text.trim()) { renderBulkPreview({ entries: [], summary: {} }); return; }
   const body = { text };
-  if (bulkTouched) body.strip_labels = $("#bulk-strip").checked;
+  // Checked = remove labels on the lines that have one (judged line by line); unchecked =
+  // never. There is no "force": that would also strip real title parts like "- Live".
+  if (!$("#bulk-strip").checked) body.strip_labels = false;
   const data = await api("/api/bulk/preview", "POST", body);
   if (data && data.error) { $("#bulk-summary").textContent = data.error; return; }
   renderBulkPreview(data);
@@ -745,7 +766,7 @@ async function doBulkDownload() {
   $("#bulk-status").textContent = "Queueing…";
   const res = await api("/api/bulk/download", "POST", {
     entries, service: $("#bulk-service").value,
-    name: $("#bulk-name").value.trim(), format: $("#format").value,
+    name: $("#bulk-name").value.trim(), format: audioFormat(),
   });
   $("#bulk-status").textContent = "";
   $("#do-bulk").disabled = false;
@@ -754,11 +775,22 @@ async function doBulkDownload() {
   const parts = [];
   if (res.tracks) parts.push(`${res.tracks} song${res.tracks === 1 ? "" : "s"}`);
   if (res.links) parts.push(`${res.links} link${res.links === 1 ? "" : "s"}`);
-  toast(`Queued · ${parts.join(" + ")}`, "success");
+  if (parts.length) toast(`Queued · ${parts.join(" + ")}`, "success");
+  if (res.links_held_back) {
+    toast(`${res.links_held_back} link${res.links_held_back === 1 ? " was" : "s were"} held back by the ` +
+          "download limit — add them again once some finish.", "error", 8000);
+  }
   closeBulk();
   $("#bulk-text").value = "";
-  bulkTouched = false;
   renderBulkPreview({ entries: [], summary: {} });
+}
+
+// The audio format to send. In Video mode the toolbar's format box holds a video quality
+// ("1080p"), which used to be sent as the audio format — for Bulk, and for any engine that
+// can't do video — and every track then failed to convert.
+function audioFormat() {
+  if (state.mediaType !== "video") return $("#format").value;
+  return state.lastAudioFormat || state.settings.audio_format || "opus";
 }
 
 /* ---------------- music library ---------------- */
@@ -1022,7 +1054,7 @@ function bind() {
   $("#do-bulk").onclick = doBulkDownload;
   $("#bulk-text").addEventListener("input", queueBulkPreview);
   $("#bulk-service").addEventListener("change", queueBulkPreview);
-  $("#bulk-strip").addEventListener("change", () => { bulkTouched = true; refreshBulkPreview(); });
+  $("#bulk-strip").addEventListener("change", refreshBulkPreview);
   $("#bulk-modal").addEventListener("click", (e) => { if (e.target.id === "bulk-modal") closeBulk(); });
   $("#unlock-input").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
   $("#unlock-modal").addEventListener("click", (e) => { if (e.target.id === "unlock-modal") closeUnlock(); });

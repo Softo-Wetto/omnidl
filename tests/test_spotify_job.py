@@ -34,11 +34,32 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", return_value=[unverified, verified]), \
-                 patch("app.jobs.decide_match", side_effect=decisions), \
+                 patch("app.matching.decide_match", side_effect=decisions), \
                  patch.object(manager, "_stream_subprocess", side_effect=download):
                 result = await manager._fetch_track(job, Track("Nova", "Midnight Run", 180), job.settings, False, 1, 1)
 
         self.assertEqual("downloaded", result.status)
+    async def test_featured_artist_credit_in_title_still_verifies(self):
+        """Spotify lists a feature as an artist; YouTube puts it in the title. That credit is
+        not a different song — treating it as one verified a shorter alternate edit of
+        "Payphone" over the exact "Payphone (feat. Wiz Khalifa)"."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = JobManager()
+            job = Job("spotify:test", "spotify", None, "",
+                      settings={"output_dir": temp_dir, "skip_existing": False, "audio_format": "opus"})
+            credited = Candidate("youtube_music", "https://youtube.test/x",
+                                 "Midnight Run (feat. Echo)", "Nova", 180, True)
+            target = Path(temp_dir) / "Nova - Midnight Run.opus"
+
+            async def download(_job, _argv, emit, **_kwargs):
+                target.touch()
+                return 0
+
+            with patch("app.jobs.candidate_search.search_all", return_value=[credited]),                  patch.object(manager, "_stream_subprocess", side_effect=download):
+                result = await manager._fetch_track(job, Track("Nova", "Midnight Run", 180), job.settings, False, 1, 1)
+
+        self.assertEqual("downloaded", result.status)
+
     async def test_plausible_nonexact_candidate_is_downloaded_and_marked_for_review(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = JobManager()
@@ -46,9 +67,10 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
                 "spotify:test", "spotify", None, "",
                 settings={"output_dir": temp_dir, "skip_existing": False, "audio_format": "opus"},
             )
-            # Same song, but extra words drop title similarity below the verified bar.
+            # Same song and length, but extra title words that are neither a credit nor a
+            # version keep it below the verified bar.
             nonexact = Candidate(
-                "youtube", "https://youtube.test/x", "Midnight Run (feat. Echo)", "Nova", 180,
+                "youtube", "https://youtube.test/x", "Midnight Run (Night Drive Session)", "Nova", 180,
             )
             target = Path(temp_dir) / "Nova - Midnight Run.opus"
 
