@@ -91,6 +91,20 @@ def _log_pot_provider() -> None:
 ACCESS = remote_access.AccessVerifier()
 
 
+async def _watch_for_access_app() -> None:
+    """Look for the Access app now, then every minute until one is found.
+
+    Otherwise a freshly created Access app is only learned when your first login arrives —
+    and if a lookup ran moments before, that first visit is refused and needs a reload.
+    Once pinned, verify() re-checks by itself if the app is ever recreated.
+    """
+    while not (ACCESS.team and ACCESS.aud):
+        await ACCESS.discover()
+        if ACCESS.team and ACCESS.aud:
+            break
+        await asyncio.sleep(60)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ACCESS
@@ -107,7 +121,7 @@ async def lifespan(app: FastAPI):
             print("[OmniDL] Remote access: no Cloudflare Access app found yet — remote requests "
                   "are refused until one protects this address.")
         if ACCESS.hostname:
-            asyncio.create_task(ACCESS.discover())   # pick up a new/changed Access app early
+            asyncio.create_task(_watch_for_access_app())
     try:
         yield
     finally:

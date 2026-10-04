@@ -187,6 +187,23 @@ class FailClosedTests(unittest.TestCase):
             self.assertEqual("me@example.com", run(v.verify(token()))["email"])
         save.assert_called_once_with({"access_team": TEAM, "access_aud": AUD})
 
+    def test_a_new_access_app_is_picked_up_without_waiting_for_a_visit(self):
+        location = (f"https://{TEAM}.cloudflareaccess.com/cdn-cgi/access/login/{HOST}"
+                    f"?kid={AUD}&meta=x&redirect_url=%2F")
+        answers = iter(["", "", location])             # app created between checks
+        v = verifier(team="", aud="", redirect=lambda url: next(answers))
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            v._last_discovery = 0                       # let the next minute's check run
+
+        with patch("app.main.ACCESS", v), patch("app.main.asyncio.sleep", fake_sleep), \
+             patch("app.remote_access.save_config"):
+            run(main._watch_for_access_app())
+        self.assertEqual((TEAM, AUD), (v.team, v.aud))
+        self.assertEqual([60, 60], sleeps)
+
     def test_discovery_never_waits_on_itself(self):
         """Without Access, Cloudflare forwards our own lookup back through the tunnel to us. That
         inner request must be refused at once, not queue behind the lookup that caused it."""
