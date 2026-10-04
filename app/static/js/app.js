@@ -330,8 +330,10 @@ function renderQueue() {
     if (job.status === "running" || job.status === "queued") {
       actions.append(makeButton("Cancel", "Cancel", () => api(`/api/jobs/${id}/cancel`, "POST"), "btn-danger"));
     } else {
-      if (job.status === "done" && job.has_files) {
-        actions.append(makeButton("⤓ Save", "Download to this device", () => {
+      if (job.status === "done" && job.has_files && canSave()) {
+        const tip = state.meta.local ? "Download a copy to this device (it's also in your PC's library)"
+                                     : "Download to this device";
+        actions.append(makeButton("⤓ Save", tip, () => {
           window.location.href = `/api/jobs/${id}/file`;
         }, "save-btn"));
       }
@@ -501,8 +503,10 @@ function notifyFinished(job) {
   if (job.status === "done") {
     // Hosted mode delivers the file through the browser, so the job isn't really "done"
     // for the user until they hit Save — say so, and note that it won't wait forever.
-    if (!state.meta.local && job.has_files) {
-      toast(`✓ Ready: ${short} — click ⤓ Save to download it`, "success", 7000);
+    if (canSave() && job.has_files) {
+      const where = state.meta.local ? "saved on your PC — click ⤓ Save for a copy here"
+                                     : "click ⤓ Save to download it";
+      toast(`✓ Ready: ${short} — ${where}`, "success", 7000);
     } else {
       toast(`✓ Finished: ${short}`, "success");
     }
@@ -989,10 +993,18 @@ function toggleTheme() {
 }
 
 /* ---------------- wire up ---------------- */
+// Save hands files to the device you're using. Hosted: always (that's the only way to get
+// them). A home install: only when reached through the tunnel — at the PC itself the files
+// are already in your library, and Save would just make a second copy in Downloads.
+function canSave() {
+  return !state.meta.local || !!state.meta.remote;
+}
+
 function syncEnvironmentControls() {
   const local = !!state.meta.local;
   $("#open-library").hidden = !local;
-  $("#open-folder").hidden = !local;
+  // Folder opens Explorer on the PC — invisible and confusing from another device.
+  $("#open-folder").hidden = !local || !!state.meta.remote;
   const hint = $("#hosted-hint");
   if (hint) hint.hidden = local;
 }

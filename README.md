@@ -61,6 +61,70 @@ python run.py
 …or just double-click **`start.bat`** on Windows. It serves on
 <http://127.0.0.1:8000> (local-only — not exposed to your network) and opens your browser.
 
+## Use your home OmniDL from anywhere (Cloudflare Tunnel)
+
+Running OmniDL on your own PC avoids YouTube's bot checks (they target datacenter IPs, not
+home connections), but it only answers on `127.0.0.1`. A Cloudflare Tunnel lets you reach it
+from a Mac, a phone, anywhere — at **<https://omnidl-home.softowetto.com>** — while it keeps
+downloading from your home connection.
+
+**Using it:** start OmniDL on the PC as usual. It starts the tunnel itself (the console shows
+`Remote access: connected`), and the tunnel stops when OmniDL does. Open the address on the
+other device and sign in with Cloudflare Access (an emailed one-time code). The PC has to
+stay on and awake.
+
+From another device, downloads still go into your PC's library as normal, and each finished
+job gets a **⤓ Save** button for a copy on the device you're using. *Folder* is hidden there,
+since it would open Explorer on the PC.
+
+**How it's kept private.** At the PC, OmniDL trusts every request completely — no passphrase,
+no limits, settings that write files — because only you can reach `127.0.0.1`. The tunnel
+connects from `127.0.0.1` too, so without a lock anyone with the address would get the same
+trust. Two locks, either of which is enough on its own:
+
+1. **Cloudflare Access** keeps anyone who isn't you from reaching the PC at all.
+2. **OmniDL checks Access's signed login token itself** on every request that came through
+   Cloudflare — the page, the API and the live-output socket — and refuses anything without a
+   valid, current token for this app (the signature, team, app and expiry are all checked).
+   So if Access is ever switched off or misconfigured, OmniDL stays locked rather than opening
+   your PC up.
+
+OmniDL learns which Access app to trust from Cloudflare itself (the login redirect for the
+address), so no IDs are copied around. Using it at the PC needs no login.
+
+**Set-up (once):**
+
+1. Install `cloudflared` — the signed binary in `%LOCALAPPDATA%\Programs\cloudflared\` is
+   picked up automatically, or put it on `PATH`.
+2. `cloudflared tunnel login` → pick `softowetto.com` in the browser.
+3. `cloudflared tunnel create omnidl-home`, then
+   `cloudflared tunnel route dns omnidl-home omnidl-home.softowetto.com`.
+4. Write `%USERPROFILE%\.cloudflared\omnidl-home.yml`:
+   ```yaml
+   tunnel: <tunnel id>
+   credentials-file: C:\Users\<you>\.cloudflared\<tunnel id>.json
+   ingress:
+     - hostname: omnidl-home.softowetto.com
+       service: http://127.0.0.1:8000
+     - service: http_status:404
+   ```
+5. Write `remote.json` next to `config.json` (gitignored; deliberately *not* editable from the
+   web UI, since the UI is what remote visitors reach):
+   ```json
+   { "hostname": "omnidl-home.softowetto.com",
+     "tunnel_config": "C:\\Users\\<you>\\.cloudflared\\omnidl-home.yml" }
+   ```
+6. In the Cloudflare Zero Trust dashboard: **Access → Applications → Add an application →
+   Self-hosted**, public hostname `omnidl-home.softowetto.com`, with a policy that **Allows**
+   only your email. Until this exists, remote visitors get a "This OmniDL is locked" page.
+
+**Notes.** cloudflared runs with `--no-autoupdate` (a self-replacing binary would escape the
+supervisor); update it by downloading the new release over the old file. Its log is
+`cloudflared.log` beside `config.json`. If you change OmniDL's port (`OMNIDL_PORT`), change
+`service:` in the tunnel config to match. Big **Save** zips are built before sending, and
+Cloudflare drops a response that hasn't started within 100 s — fine for hundreds of tracks,
+but not for a whole multi-gigabyte library at once.
+
 ## Usage
 
 - **Paste a link** — the engine chip shows which tool will be used (auto-detected):

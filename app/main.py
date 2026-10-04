@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import mimetypes
 import re
 import subprocess
@@ -18,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 
 from . import bulk_input, candidate_search, engines, library, sessions, settings as settings_mod
+from . import remote_access, tunnel
 from . import spotify_resolver as sr
 from .jobs import JobManager
 
@@ -85,13 +87,32 @@ def _log_pot_provider() -> None:
               "(needs the bgutil yt-dlp plugin installed)")
 
 
+# Cloudflare Access verification for requests that arrive through the tunnel (local mode only).
+ACCESS = remote_access.AccessVerifier()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global ACCESS
     manager.start()
     _log_cookie_health()
     _log_pot_provider()
     _log_ytdlp_age()
-    yield
+    running_tunnel = None
+    if settings_mod.LOCAL_MODE:
+        cfg = remote_access.load_config()
+        ACCESS = remote_access.AccessVerifier.from_config()
+        running_tunnel = tunnel.start_from_config(cfg)
+        if running_tunnel and not (ACCESS.team and ACCESS.aud):
+            print("[OmniDL] Remote access: no Cloudflare Access app found yet — remote requests "
+                  "are refused until one protects this address.")
+        if ACCESS.hostname:
+            asyncio.create_task(ACCESS.discover())   # pick up a new/changed Access app early
+    try:
+        yield
+    finally:
+        if running_tunnel:
+            running_tunnel.stop()
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -129,6 +150,35 @@ async def session_middleware(request: Request, call_next):
             secure=sessions.COOKIE_SECURE,
         )
     return response
+
+
+async def _remote_refusal(headers, cookies) -> str | None:
+    """Why a request must be refused, or None if it may proceed.
+
+    Only local mode needs this: it trusts every caller completely, which is right for
+    127.0.0.1 and wrong for anything the tunnel brings in. Hosted mode has its own gate and
+    sits behind Cloudflare legitimately, so it is left alone.
+    """
+    if not settings_mod.LOCAL_MODE or not remote_access.came_through_cloudflare(headers):
+        return None
+    try:
+        await ACCESS.verify(remote_access.token_from(headers, cookies))
+    except remote_access.AccessError as exc:
+        return str(exc)
+    return None
+
+
+# Defined after session_middleware so it wraps it: a refused request gets no session at all.
+@app.middleware("http")
+async def remote_access_guard(request: Request, call_next):
+    problem = await _remote_refusal(request.headers, request.cookies)
+    if problem:
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": problem}, status_code=403, headers=_NO_CACHE)
+        return HTMLResponse(remote_access.REFUSED_PAGE.format(message=html.escape(problem)),
+                            status_code=403, headers=_NO_CACHE)
+    request.state.remote = settings_mod.LOCAL_MODE and remote_access.came_through_cloudflare(request.headers)
+    return await call_next(request)
 
 
 def _sid(request: Request) -> str:
@@ -245,6 +295,9 @@ async def meta(request: Request):
         "video_qualities": settings_mod.VIDEO_QUALITIES,
         "video_containers": settings_mod.VIDEO_CONTAINERS,
         "local": settings_mod.LOCAL_MODE,
+        # Using a home install from another device: files can't be opened on this screen's
+        # computer, so the UI offers Save (a copy to this device) instead of Open folder.
+        "remote": bool(getattr(request.state, "remote", False)),
         "max_concurrency": settings_mod.MAX_CONCURRENCY,
         "naming_orders": settings_mod.NAMING_ORDERS,
         "naming_artists": settings_mod.NAMING_ARTISTS,
@@ -589,9 +642,16 @@ async def job_file(request: Request, job_id: str):
     zip_name = f"{_safe_name(base)[:60] or 'omnidl'}.zip"
     tmp = tempfile.NamedTemporaryFile(prefix="omnidl_zip_", suffix=".zip", delete=False)
     tmp.close()
-    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as zf:
+    # Stored, not deflated: audio is already compressed, so deflating only costs time — and
+    # through a Cloudflare tunnel the response must start within 100s or it's cut off.
+    used: set[str] = set()
+    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as zf:
         for f in files:
-            zf.write(f, arcname=f.name)
+            name = f.name
+            if name in used:                       # same name from different folders
+                name = f"{f.parent.name} - {f.name}"
+            used.add(name)
+            zf.write(f, arcname=name)
     return FileResponse(
         tmp.name, media_type="application/zip", filename=zip_name,
         background=BackgroundTask(lambda: Path(tmp.name).unlink(missing_ok=True)),
@@ -619,6 +679,11 @@ async def open_folder():
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    # HTTP middleware never sees WebSocket upgrades, so the live feed is guarded here too —
+    # otherwise anyone could watch the job log and file names without logging in.
+    if await _remote_refusal(websocket.headers, websocket.cookies):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     sid = sessions.read_valid_sid(websocket.cookies.get(sessions.COOKIE_NAME)) or ""
     manager.subscribers[websocket] = sid

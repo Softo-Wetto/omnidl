@@ -124,6 +124,9 @@ def _ytdlp_common(s: dict) -> list[str]:
         cmd += ["--cookies-from-browser", browser]
     if s.get("sponsorblock"):
         cmd += ["--sponsorblock-remove", "music_offtopic"]
+    if s.get("_produced_file"):
+        # One line per final file — how a local job knows what it saved, for Save on another device.
+        cmd += ["--print-to-file", "after_move:filepath", s["_produced_file"]]
     if _settings.POT_PROVIDER_URL:
         cmd += ["--extractor-args", f"youtubepot-bgutilhttp:base_url={_settings.POT_PROVIDER_URL}"]
     return cmd

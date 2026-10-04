@@ -51,6 +51,55 @@ _HISTORY_OUTPUT_CAP = 12_000
 # Cap how much output we retain per job for reconnect/replay (characters).
 _OUTPUT_CAP = 200_000
 
+_AUDIO_SUFFIXES = {".opus", ".m4a", ".mp3", ".flac", ".wav", ".ogg", ".aac", ".webm", ".mp4", ".mkv"}
+
+
+def _produced_list_path(job_id: str) -> Path:
+    import tempfile
+    folder = Path(tempfile.gettempdir()) / "omnidl-produced"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{job_id}.txt"
+
+
+def _audio_snapshot(job: "Job") -> dict[str, float] | None:
+    """Media files under the output folder before a job runs, for tools that can't report
+    what they saved (scdl, spotdl). yt-dlp jobs report exactly, so they skip the walk."""
+    if job.settings.get("_produced_file"):
+        return None
+    root = Path(job.settings.get("output_dir") or "")
+    snapshot: dict[str, float] = {}
+    try:
+        for dirpath, _dirs, names in os.walk(root):
+            for name in names:
+                if Path(name).suffix.lower() in _AUDIO_SUFFIXES:
+                    path = os.path.join(dirpath, name)
+                    try:
+                        snapshot[path] = os.path.getmtime(path)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
+    return snapshot
+
+
+def _collect_produced(job: "Job", before: dict[str, float] | None) -> list[str]:
+    report = job.settings.get("_produced_file")
+    if report:
+        path = Path(report)
+        try:
+            lines = [line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines()]
+        except OSError:
+            lines = []
+        path.unlink(missing_ok=True)
+        return [line for line in lines if line]
+    if before is None:
+        return []
+    # New or rewritten since the job started. Another job writing into the same folder at the
+    # same time could be picked up too — acceptable for the two tools that can't report.
+    after = _audio_snapshot(job) or {}
+    return sorted(p for p, mtime in after.items() if before.get(p) != mtime)
+
+
 _SERVICE_NAMES = {"auto": "all services", "youtube": "YouTube", "soundcloud": "SoundCloud"}
 # What the queue calls a job. A typed song isn't "YouTube" any more — it can come from any service.
 _KIND_LABELS = {"search": "Song search", "bulk": "Bulk list"}
@@ -221,6 +270,9 @@ class Job:
         self.progress: int | None = None
         self.label = ""
         self.procs: set[asyncio.subprocess.Process] = set()  # live subprocesses
+        # Local mode writes straight into your library (out_dir is None), so the files a job
+        # made are recorded one by one instead — that's what Save hands to a remote device.
+        self.produced: list[str] = []
 
     def append(self, text: str) -> None:
         self.output += text
@@ -229,11 +281,23 @@ class Job:
 
     def list_files(self) -> list[Path]:
         """Files this job produced, available to download (newest run only)."""
-        if not self.out_dir or not self.out_dir.exists():
+        if self.out_dir is None:
+            seen, files = set(), []
+            for raw in self.produced:
+                path = Path(raw)
+                if raw not in seen and path.is_file():
+                    seen.add(raw)
+                    files.append(path)
+            return files
+        if not self.out_dir.exists():
             return []
         return sorted(p for p in self.out_dir.iterdir() if p.is_file())
 
     def has_files(self) -> bool:
+        # Local mode answers from the record rather than the disk: this runs for every job in
+        # every snapshot, and a 500-track list would otherwise stat 500 files each time.
+        if self.out_dir is None:
+            return bool(self.produced)
         return bool(self.list_files())
 
     def to_dict(self) -> dict:
@@ -271,6 +335,7 @@ class Job:
                            "duration": t.duration} for t in self.tracks]
                          if self.tracks is not None else None)
         rec["session"] = self.session
+        rec["produced"] = list(self.produced)
         rec["out_dir"] = str(self.out_dir) if self.out_dir else None
         return rec
 
@@ -302,6 +367,7 @@ class Job:
         job.finished = rec.get("finished")
         job.progress = rec.get("progress")
         job.label = rec.get("label", "")
+        job.produced = [str(p) for p in rec.get("produced") or []]
         # Keep the mode fields so a retry from history still reproduces the original job.
         job.settings = {
             "media_type": rec.get("media_type", "audio"),
@@ -538,6 +604,10 @@ class JobManager:
             job.kind = "spotify"
             job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
         else:
+            if job.out_dir is None and engine == "youtube":
+                # yt-dlp reports every file it ends up with (including ones it skipped as
+                # already downloaded), which is exact even with other jobs writing alongside.
+                s["_produced_file"] = str(_produced_list_path(job.id))
             job.argv = engines.build_command(engine, input_text, s)
             job.display_cmd = engines.describe_command(job.argv)
 
@@ -725,7 +795,10 @@ class JobManager:
                 await self._run_tracklist_job(job)
             else:
                 await self._emit(job, f"\r\n\x1b[1;36m$ {job.display_cmd}\x1b[0m\r\n")
+                before = _audio_snapshot(job) if job.out_dir is None else None
                 job.code = await self._stream_subprocess(job, job.argv)
+                if job.out_dir is None:
+                    job.produced.extend(_collect_produced(job, before))
                 if job.status != "cancelled":
                     job.status = "done" if job.code == 0 else "error"
                     if job.status == "done":
@@ -977,6 +1050,7 @@ class JobManager:
                         track, "download_failed", f"no song identified; search download failed ({why})", []))
                 await status(f"\x1b[33m? saved for review\x1b[0m \x1b[2m{target.name} "
                              f"(no song identified - YouTube's top result)\x1b[0m", store=True)
+                job.produced.append(str(target))
                 return await finish(TrackOutcome(
                     track, "downloaded_for_review",
                     "no song could be identified from this text, so YouTube's top result was saved",
@@ -1039,6 +1113,7 @@ class JobManager:
                 ))
 
             await asyncio.to_thread(self._tag, target, track)
+            job.produced.append(str(target))
             result = "downloaded" if selected.accepted else "downloaded_for_review"
             tail = f"\x1b[2m{target.name} ({selected.candidate.source}, {selected.score}/100)\x1b[0m"
             if selected.accepted:

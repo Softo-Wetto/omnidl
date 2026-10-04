@@ -12,3 +12,5 @@ build/
 dist/
 *.env
 .env.local
+remote.json
+cloudflared.log
