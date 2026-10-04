@@ -6,6 +6,10 @@ name: Uptime check
 #
 # Note: GitHub pauses scheduled workflows in a public repo after 60 days with no commits.
 # If the emails stop and the Actions tab shows this disabled, click "Enable workflow".
+#
+# Never add this file in a commit whose message contains [skip ci]: the first version was,
+# and GitHub never registered the schedule (0 runs in 4 hours). deploy.yml ignores this
+# file, so a normal commit that only touches it does not redeploy OmniDL.
 
 on:
   schedule:
