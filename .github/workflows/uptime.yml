@@ -1,0 +1,32 @@
+name: Uptime check
+
+# External dead-man's switch for the VPS. The server's own health check (vps-health.sh)
+# can't report that the server itself is down, so this runs on GitHub's machines instead.
+# A failed run makes GitHub email you (Settings > Notifications > Actions).
+#
+# Note: GitHub pauses scheduled workflows in a public repo after 60 days with no commits.
+# If the emails stop and the Actions tab shows this disabled, click "Enable workflow".
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Public endpoints answer 200
+        run: |
+          fail=0
+          for url in https://omnidl.softowetto.com/api/meta \
+                     https://api-midi.softowetto.com/api/health \
+                     https://api-docs.softowetto.com/api/health \
+                     https://api-certs.softowetto.com/api/health \
+                     https://import-midi.softowetto.com/health; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' -m 20 --retry 2 --retry-delay 15 "$url")
+            echo "$code  $url"
+            [ "$code" = "200" ] || { echo "::error::$url returned HTTP $code"; fail=1; }
+          done
+          exit $fail

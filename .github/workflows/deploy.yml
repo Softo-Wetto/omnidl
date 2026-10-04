@@ -14,6 +14,7 @@ on:
       - "**/*.md"
       - "docs/**"
       - ".gitignore"
+      - ".github/workflows/uptime.yml"
   workflow_dispatch: {}
 
 concurrency:
