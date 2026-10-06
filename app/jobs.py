@@ -126,6 +126,21 @@ def _short_error(lines: list[str]) -> str:
     return last.replace("ERROR:", "").strip()[:80]
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _failure_note(output: str) -> str:
+    """The most telling line of a failed job's log, for its card in the queue."""
+    lines = [_ANSI_RE.sub("", line).strip() for line in output.replace("\r", "\n").split("\n")]
+    lines = [line for line in lines if line and not line.startswith("[error] exit=")
+             and not line.startswith("[done]") and not line.startswith("[cancelled]")]
+    for line in reversed(lines):
+        if "ERROR" in line or line.startswith("[error]"):
+            note = _short_error([line])
+            return note if note else line[:120]
+    return lines[-1][:120] if lines else ""
+
+
 # Progress / current-item parsing (works across yt-dlp, spotdl, scdl).
 _PCT_RE = re.compile(r"(\d{1,3}(?:\.\d+)?)%")
 _DEST_RE = re.compile(r"Destination:\s*(.+)")
@@ -273,6 +288,12 @@ class Job:
         # Local mode writes straight into your library (out_dir is None), so the files a job
         # made are recorded one by one instead — that's what Save hands to a remote device.
         self.produced: list[str] = []
+        # The review report this run wrote (tracks saved for review or not found), and how many
+        # tracks it lists — so the queue can offer it on any device, not just as a file on disk.
+        self.report_path: str | None = None
+        self.review_count = 0
+        # One line on why a job failed, shown on its card without opening the log.
+        self.note = ""
 
     def append(self, text: str) -> None:
         self.output += text
@@ -308,7 +329,9 @@ class Job:
             "kind": self.kind,
             "engine": self.engine,
             "engine_label": _KIND_LABELS.get(self.kind, meta["label"]),
-            "tool": meta["tool"],
+            # A matched song can come from any service, so say where it searched, not "yt-dlp".
+            "tool": (_SERVICE_NAMES.get(self.settings.get("bulk_service") or "auto", "all services")
+                     if self.kind in _KIND_LABELS else meta["tool"]),
             "status": self.status,
             "code": self.code,
             "created": self.created,
@@ -321,6 +344,9 @@ class Job:
             "video_quality": self.settings.get("video_quality"),
             "audio_format": self.settings.get("audio_format"),
             "has_files": self.status == "done" and self.has_files(),
+            "review_count": self.review_count,
+            "has_report": bool(self.report_path) and Path(self.report_path).is_file(),
+            "note": self.note,
         }
 
     def to_record(self) -> dict:
@@ -336,6 +362,7 @@ class Job:
                          if self.tracks is not None else None)
         rec["session"] = self.session
         rec["produced"] = list(self.produced)
+        rec["report_path"] = self.report_path
         rec["out_dir"] = str(self.out_dir) if self.out_dir else None
         return rec
 
@@ -368,6 +395,9 @@ class Job:
         job.progress = rec.get("progress")
         job.label = rec.get("label", "")
         job.produced = [str(p) for p in rec.get("produced") or []]
+        job.report_path = rec.get("report_path")
+        job.review_count = int(rec.get("review_count") or 0)
+        job.note = rec.get("note") or ""
         # Keep the mode fields so a retry from history still reproduces the original job.
         job.settings = {
             "media_type": rec.get("media_type", "audio"),
@@ -811,6 +841,8 @@ class JobManager:
             await self._emit(job, f"\r\n\x1b[31m[error] {exc}\x1b[0m\r\n")
         finally:
             job.finished = time.time()
+            if job.status == "error" and not job.note:
+                job.note = _failure_note(job.output)
             job.procs.clear()
             colour = {"done": "32", "cancelled": "33", "error": "31"}.get(job.status, "0")
             await self._emit(
@@ -870,7 +902,7 @@ class JobManager:
 
         concurrency = max(1, min(8, int(settings.get("concurrency", 1) or 1)))
         if total and concurrency > 1:
-            await self._emit(job, f"\x1b[2m   ? downloading {concurrency} at a time (compact per-track log)\x1b[0m\r\n")
+            await self._emit(job, f"\x1b[2m   \u21c9 downloading {concurrency} at a time (compact per-track log)\x1b[0m\r\n")
 
         outcomes: dict[int, TrackOutcome] = {}
         tracks_by_index: dict[int, object] = {}
@@ -907,7 +939,7 @@ class JobManager:
             retryable = [i for i, o in outcomes.items()
                          if o.status == "download_failed" and o.failed_attempts]
             if retryable:
-                await self._emit(job, f"\r\n\x1b[33m? retrying {len(retryable)} track(s) that hit YouTube "
+                await self._emit(job, f"\r\n\x1b[33m\u21bb retrying {len(retryable)} track(s) that hit YouTube "
                                        f"throttling \x1b[2m(one at a time)\x1b[0m\r\n")
                 for i in retryable:
                     if job.status == "cancelled":
@@ -935,6 +967,7 @@ class JobManager:
             if unresolved:
                 list_title = resolved.name if resolved is not None else (job.list_name or "Pasted list")
                 report_path = await self._emit_review_report(job, Path(settings["output_dir"]), list_title, unresolved)
+                job.review_count = len(unresolved)
             job.progress = 100
             job.code = 0 if counts["fail"] == 0 else 1
             job.status = "done" if (counts["ok"] + counts["skip"]) > 0 or total == 0 else "error"
@@ -950,8 +983,9 @@ class JobManager:
             return None
         try:
             path = await asyncio.to_thread(write_review_report, output_dir, playlist_name, outcomes)
+            job.report_path = str(path)
         except OSError as exc:
-            await self._emit(job, f"\x1b[31m? Could not write review report: {exc}\x1b[0m\r\n")
+            await self._emit(job, f"\x1b[31m\u2717 Could not write review report: {exc}\x1b[0m\r\n")
             return None
         await self._emit(job, f"\x1b[33m\U0001f4c4 Review report: {path}\x1b[0m\r\n")
         return path
@@ -1001,14 +1035,14 @@ class JobManager:
         async def download(url: str, source: str, what: str) -> tuple[bool, str]:
             """Fetch one URL, retrying the same candidate. Returns (ok, last error)."""
             async def progress(info: str) -> None:
-                await status(f"\x1b[36m? {info} \x1b[2m({source})\x1b[0m")
+                await status(f"\x1b[36m\u2913 {info} \x1b[2m({source})\x1b[0m")
 
             why = ""
             for attempt in range(1, _DL_ATTEMPTS + 1):
                 if job.status == "cancelled":
                     return False, "cancelled"
                 suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
-                await status(f"\x1b[2m? trying {source} ({what}){suffix}...\x1b[0m")
+                await status(f"\x1b[2m\u2192 trying {source} ({what}){suffix}...\x1b[0m")
                 errors: list[str] = []
                 code = await self._stream_subprocess(
                     job, engines.media_url_command(url, basename, settings),
@@ -1025,13 +1059,13 @@ class JobManager:
         if detailed:
             await self._emit(job, f"\r\n{label}\r\n")
         if settings.get("skip_existing", True) and target.exists():
-            await status("\x1b[33m? already downloaded\x1b[0m", store=True)
+            await status("\x1b[33m\u23ed already downloaded\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "skipped", "output file already exists", []))
         if settings.get("skip_existing", True) and settings.get("_library_index") and track.artist:
             existing = settings["_library_index"].find(track.artist, track.title, track.duration)
             if existing is not None:
                 relative = existing.relative_path
-                await status(f"\x1b[33m? already in library\x1b[0m \x1b[2m({relative})\x1b[0m", store=True)
+                await status(f"\x1b[33m\u23ed already in library\x1b[0m \x1b[2m({relative})\x1b[0m", store=True)
                 return await finish(TrackOutcome(
                     track, "skipped", f"matching library file already exists: {relative}", [],
                 ))
@@ -1045,10 +1079,10 @@ class JobManager:
                 if job.status == "cancelled":
                     return await finish(TrackOutcome(track, "cancelled", "job cancelled", []))
                 if not ok:
-                    await status(f"\x1b[31m? couldn't download ({why}); added to review\x1b[0m", store=True)
+                    await status(f"\x1b[31m\u2717 couldn't download ({why}); added to review\x1b[0m", store=True)
                     return await finish(TrackOutcome(
                         track, "download_failed", f"no song identified; search download failed ({why})", []))
-                await status(f"\x1b[33m? saved for review\x1b[0m \x1b[2m{target.name} "
+                await status(f"\x1b[33m\u26a0 saved for review\x1b[0m \x1b[2m{target.name} "
                              f"(no song identified - YouTube's top result)\x1b[0m", store=True)
                 job.produced.append(str(target))
                 return await finish(TrackOutcome(
@@ -1056,7 +1090,7 @@ class JobManager:
                     "no song could be identified from this text, so YouTube's top result was saved",
                     [], saved_as=target.name))
 
-            await status("\x1b[2m?? searching sources...\x1b[0m")
+            await status("\x1b[2m\U0001f50e searching sources...\x1b[0m")
             candidates = await asyncio.to_thread(
                 candidate_search.search_all, track.artist, track.title,
                 settings.get("bulk_service", "auto"))
@@ -1067,7 +1101,7 @@ class JobManager:
             )
             decisions = choice.decisions
             if not decisions:
-                await status("\x1b[33m?? no source found; added to review report\x1b[0m", store=True)
+                await status("\x1b[33m\u26a0 no source found; added to review report\x1b[0m", store=True)
                 return await finish(TrackOutcome(track, "no_candidate", "no external candidates found", []))
 
             # Only ever download a candidate that is this song AND this version (see choose()).
@@ -1106,7 +1140,7 @@ class JobManager:
                 else:
                     msg = "no confident match found (skipped to avoid a wrong version)"
                     reason = "no confident match available"
-                await status(f"\x1b[31m? {msg}; added to review\x1b[0m", store=True)
+                await status(f"\x1b[31m\u2717 {msg}; added to review\x1b[0m", store=True)
                 return await finish(TrackOutcome(
                     track, "download_failed", reason,
                     decisions[:5], failed_attempts=tuple(attempts),
@@ -1117,9 +1151,9 @@ class JobManager:
             result = "downloaded" if selected.accepted else "downloaded_for_review"
             tail = f"\x1b[2m{target.name} ({selected.candidate.source}, {selected.score}/100)\x1b[0m"
             if selected.accepted:
-                await status(f"\x1b[32m? saved\x1b[0m {tail}", store=True)
+                await status(f"\x1b[32m\u2713 saved\x1b[0m {tail}", store=True)
             else:
-                await status(f"\x1b[33m? saved for review\x1b[0m {tail}", store=True)
+                await status(f"\x1b[33m\u26a0 saved for review\x1b[0m {tail}", store=True)
             return await finish(TrackOutcome(
                 track, result,
                 "verified match" if selected.accepted else selected.reason,
@@ -1127,10 +1161,10 @@ class JobManager:
                 failed_attempts=tuple(attempts),
             ))
         except FileNotFoundError as exc:
-            await status(f"\x1b[31m? {exc}\x1b[0m", store=True)
+            await status(f"\x1b[31m\u2717 {exc}\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "download_failed", str(exc), []))
         except Exception as exc:  # noqa: BLE001
-            await status(f"\x1b[31m? {exc}\x1b[0m", store=True)
+            await status(f"\x1b[31m\u2717 {exc}\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "download_failed", str(exc), []))
 
     @staticmethod

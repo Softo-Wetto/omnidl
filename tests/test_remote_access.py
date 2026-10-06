@@ -232,9 +232,13 @@ class RedirectParsingTests(unittest.TestCase):
                 self.assertIsNone(parse_access_redirect(loc, HOST))
 
 
-def request(headers=None, cookies=None):
-    return types.SimpleNamespace(headers=headers or {}, cookies=cookies or {},
-                                 url=types.SimpleNamespace(path="/api/meta"),
+PC = {"host": "127.0.0.1:8000"}
+TUNNEL = {"host": HOST, "cf-ray": "x", "cf-connecting-ip": "203.0.113.5"}
+
+
+def request(headers=None, cookies=None, method="GET", path="/api/meta"):
+    return types.SimpleNamespace(headers=headers or {}, cookies=cookies or {}, method=method,
+                                 url=types.SimpleNamespace(path=path),
                                  state=types.SimpleNamespace())
 
 
@@ -244,53 +248,91 @@ class GuardTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
-    def refusal(self, headers, cookies=None, local=True):
+    def refusal(self, headers, cookies=None, local=True, method="GET", websocket=False):
         with patch("app.main.settings_mod.LOCAL_MODE", local):
-            return run(main._remote_refusal(headers, cookies or {}))
+            return run(main._local_refusal(headers, cookies or {}, method, websocket))
 
     def test_using_it_at_the_pc_needs_nothing(self):
-        self.assertIsNone(self.refusal({}))
+        for host in ("127.0.0.1:8000", "localhost:8000", "[::1]:8000", "127.0.0.1"):
+            with self.subTest(host=host):
+                self.assertIsNone(self.refusal({"host": host}))
 
     def test_through_the_tunnel_without_a_login_is_refused(self):
-        self.assertTrue(self.refusal({"cf-connecting-ip": "203.0.113.5", "cf-ray": "x"}))
+        self.assertTrue(self.refusal(TUNNEL))
 
     def test_through_the_tunnel_with_a_login_is_allowed(self):
-        self.assertIsNone(self.refusal({"cf-ray": "x", "cf-access-jwt-assertion": token()}))
+        self.assertIsNone(self.refusal({**TUNNEL, "cf-access-jwt-assertion": token()}))
 
     def test_the_access_cookie_also_counts(self):
-        self.assertIsNone(self.refusal({"cf-ray": "x"}, {"CF_Authorization": token()}))
+        self.assertIsNone(self.refusal(TUNNEL, {"CF_Authorization": token()}))
 
     def test_the_hosted_site_is_untouched(self):
         """The VPS sits behind Cloudflare legitimately and has its own passphrase gate."""
-        self.assertIsNone(self.refusal({"cf-ray": "x"}, local=False))
+        self.assertIsNone(self.refusal({"host": "omnidl.softowetto.com", "cf-ray": "x",
+                                        "origin": "https://evil.example"}, local=False, method="POST"))
 
+    # -- attacks reproduced against the running app before the fix ---------------------
+    def test_dns_rebinding_is_refused(self):
+        """evil.example repointed at 127.0.0.1: the request lands here but names evil.example.
+        Before the fix this read your settings — including your library's folder."""
+        for method in ("GET", "POST"):
+            with self.subTest(method=method):
+                self.assertIn("isn't one OmniDL answers to",
+                              self.refusal({"host": "evil.example"}, method=method))
+        self.assertTrue(self.refusal({}))                        # no Host at all
+
+    def test_another_websites_form_cannot_change_anything(self):
+        reason = self.refusal({**PC, "origin": "https://evil.example"}, method="POST")
+        self.assertIn("other websites", reason)
+        self.assertTrue(self.refusal({**PC, "origin": "null"}, method="DELETE"))   # sandboxed frame
+
+    def test_another_website_cannot_open_the_live_feed(self):
+        """WebSockets skip cross-origin rules; before the fix any site could read your jobs."""
+        self.assertTrue(self.refusal({**PC, "origin": "https://evil.example"}, websocket=True))
+        self.assertIsNone(self.refusal({**PC, "origin": "http://127.0.0.1:8000"}, websocket=True))
+
+    def test_our_own_pages_are_allowed_to_change_things(self):
+        self.assertIsNone(self.refusal({**PC, "origin": "http://127.0.0.1:8000"}, method="POST"))
+        self.assertIsNone(self.refusal({**TUNNEL, "origin": f"https://{HOST}",
+                                        "cf-access-jwt-assertion": token()}, method="POST"))
+
+    def test_a_different_local_port_is_a_different_site(self):
+        self.assertTrue(self.refusal({**PC, "origin": "http://127.0.0.1:5173"}, method="POST"))
+
+    def test_reading_from_another_site_still_works(self):
+        """Plain GETs carry no Origin-based check — links into the dashboard must keep working."""
+        self.assertIsNone(self.refusal({**PC, "origin": "https://example.com"}, method="GET"))
+
+    # -- responses -----------------------------------------------------------------------
     def test_a_refused_page_request_gets_a_page_and_an_api_call_gets_json(self):
         async def call_next(_request):
             raise AssertionError("a refused request must not reach the app")
 
         with patch("app.main.settings_mod.LOCAL_MODE", True):
-            api = run(main.remote_access_guard(request({"cf-ray": "x"}), call_next))
-            page_req = request({"cf-ray": "x"})
-            page_req.url.path = "/dashboard"
-            page = run(main.remote_access_guard(page_req, call_next))
+            api = run(main.remote_access_guard(request(TUNNEL), call_next))
+            page = run(main.remote_access_guard(request(TUNNEL, path="/dashboard"), call_next))
         self.assertEqual((403, "application/json"), (api.status_code, api.media_type))
         self.assertEqual(403, page.status_code)
         self.assertIn(b"This OmniDL is locked", page.body)
 
     def test_an_allowed_remote_request_is_marked_remote(self):
+        from fastapi.responses import JSONResponse
+        seen = []
+
         async def call_next(req):
-            return req.state.remote
+            seen.append(req.state.remote)
+            return JSONResponse({})
 
         with patch("app.main.settings_mod.LOCAL_MODE", True):
-            self.assertTrue(run(main.remote_access_guard(
-                request({"cf-ray": "x", "cf-access-jwt-assertion": token()}), call_next)))
-            self.assertFalse(run(main.remote_access_guard(request({}), call_next)))
+            run(main.remote_access_guard(request({**TUNNEL, "cf-access-jwt-assertion": token()}), call_next))
+            run(main.remote_access_guard(request(PC), call_next))
+        self.assertEqual([True, False], seen)
 
     def test_the_live_feed_websocket_is_guarded_too(self):
         closed = []
 
         class FakeSocket:
-            headers = {"cf-ray": "x"}
+            headers = TUNNEL
             cookies = {}
 
             async def close(self, code):

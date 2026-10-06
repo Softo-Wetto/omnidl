@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OmniDL</title>
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="manifest" href="/static/manifest.webmanifest" crossorigin="use-credentials" />
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" />
+  <meta name="theme-color" content="#0a0c10" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="OmniDL" />
   <link rel="stylesheet" href="/static/css/style.css" />
   <script>try{if(localStorage.getItem('omnidl-theme')==='light')document.documentElement.classList.add('light');}catch(e){}</script>
 </head>
@@ -52,6 +58,7 @@
       </nav>
 
       <div class="header-utilities">
+        <span id="remote-badge" class="remote-badge" title="You're using the OmniDL running on your home PC — downloads land in its library" hidden>&#127968;<span class="remote-text"> Home PC</span></span>
         <span id="conn" class="conn off" title="Connection status"><i></i>offline</span>
         <button id="theme-toggle" class="header-icon" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">☀</button>
       </div>
@@ -64,7 +71,7 @@
         <div class="input-wrap">
           <span class="input-ico">🔎</span>
           <input id="input" type="text" autocomplete="off" spellcheck="false"
-                 placeholder="Paste a Spotify / YouTube / SoundCloud link, or type a search…" />
+                 placeholder="Paste a link, or type a song — e.g. drake one dance" />
         </div>
         <select id="engine" title="Engine">
           <option value="auto">Auto-detect</option>
@@ -81,7 +88,7 @@
         <button id="download" class="primary">Download <span class="arr">▸</span></button>
       </div>
       <div class="smartbar-meta">
-        <span id="detected" class="chip">—</span>
+        <span id="detected" class="chip" hidden></span>
         <span class="hint" id="hint"></span>
       </div>
     </div>
@@ -100,7 +107,7 @@
         <button id="jump-latest" class="jump-latest hidden">↓ Jump to latest</button>
         <div id="term-empty" class="empty-state">
           <div class="empty-emoji">🎧</div>
-          <p>Paste a link above and hit <b>Download</b>.</p>
+          <p>Paste a link or type a song above, then hit <b>Download</b>.</p>
           <p class="dim">Live progress streams here.</p>
         </div>
       </div>
@@ -137,8 +144,8 @@
       </div>
       <div class="modal-body">
         <div class="field-note">
-          These preferences apply to <strong>your downloads only</strong> and are remembered
-          for this browser. Spotify links are resolved via the public embed page (no API, no
+          <span id="settings-scope">These preferences apply to <strong>your downloads only</strong>,
+          in this browser.</span> Spotify links are resolved via the public embed page (no API, no
           login, no Premium) and the audio is matched on YouTube.
         </div>
 
@@ -205,6 +212,15 @@
           <span>Skip already-downloaded tracks <span class="muted">(resume playlists)</span></span>
           <input id="set-skip-existing" type="checkbox" class="switch" />
         </label>
+
+        <div id="maintenance" hidden>
+          <div class="section-label">Maintenance</div>
+          <div class="maint-row">
+            <span>yt-dlp <span class="muted" id="ytdlp-status">—</span>
+              <span class="muted maint-why">YouTube breaks old versions; update when downloads start failing, or monthly.</span></span>
+            <button id="update-ytdlp" type="button" class="ghost">Update yt-dlp</button>
+          </div>
+        </div>
       </div>
       <div class="modal-foot">
         <span id="settings-status" class="status-msg"></span>

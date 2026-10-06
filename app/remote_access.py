@@ -36,7 +36,7 @@ _SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
 _CLOCK_SKEW = 60                 # seconds of leeway on exp/nbf
 _KEYS_TTL = 3600                 # re-read the team's signing keys hourly (Cloudflare rotates them)
 _REFETCH_GAP = 60                # at most one key refresh a minute, however many bad tokens arrive
-_DISCOVERY_GAP = 30              # at most one Access lookup per 30s
+_DISCOVERY_GAP = 10              # at most one Access lookup per 10s
 
 
 class AccessError(Exception):

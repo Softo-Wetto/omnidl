@@ -35,14 +35,16 @@
   window.addEventListener("resize", onScroll, { passive: true });
   onScroll();
 
-  // Animated stat counters — count up when the stats row scrolls into view.
+  // Animated stat counters — count up when the stats row scrolls into view. The real numbers
+  // are in the HTML; they're only zeroed here once we know the count-up will actually run, so
+  // reduced motion, no IntersectionObserver or a script error all still show the right values.
   const nums = document.querySelectorAll(".stat .num[data-target]");
-  if (nums.length && "IntersectionObserver" in window) {
-    const reduceM = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduceM = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (nums.length && "IntersectionObserver" in window && !reduceM) {
+    nums.forEach((n) => { n.textContent = "0" + (n.dataset.suffix || ""); });
     const animate = (node) => {
       const target = parseFloat(node.dataset.target);
       const suffix = node.dataset.suffix || "";
-      if (reduceM) { node.textContent = target + suffix; return; }
       const dur = 1100; const t0 = performance.now();
       const tick = (now) => {
         const k = Math.min((now - t0) / dur, 1);

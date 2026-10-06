@@ -1,4 +1,3 @@
-import html
 import json
 import re
 import subprocess
@@ -101,31 +100,73 @@ const landing = seconds(getComputedStyle(document.getElementById("landing")).tra
 document.body.dataset.timings = JSON.stringify({{ dashboard, landing }});
 </script></body></html>"""
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
             directory = Path(directory)
             page = directory / "timings.html"
             page.write_text(fixture, encoding="utf-8")
-            completed = subprocess.run(
-                [
-                    str(edge),
-                    "--headless=new",
-                    "--disable-gpu",
-                    "--no-first-run",
-                    f"--user-data-dir={directory / 'profile'}",
-                    "--dump-dom",
-                    page.as_uri(),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-        self.assertEqual(0, completed.returncode, completed.stderr)
-        match = re.search(r'data-timings="([^"]+)"', completed.stdout)
-        self.assertIsNotNone(match, completed.stdout)
-        timings = json.loads(html.unescape(match.group(1)))
+            # Read the result over the DevTools protocol. Edge's --dump-dom used to be enough,
+            # but current Edge prints nothing with it (even for a one-line page), which left
+            # this test failing on every run without ever measuring anything.
+            value = _evaluate_in_edge(edge, page.as_uri(), "document.body.dataset.timings",
+                                      directory / "profile")
+        self.assertIsNotNone(value, "Edge did not report the computed timings")
+        timings = json.loads(value)
         self.assertLessEqual(max(timings["dashboard"]), 0.25)
         self.assertLessEqual(timings["landing"], 0.30)
+
+
+def _evaluate_in_edge(edge: Path, url: str, expression: str, profile: Path):
+    """Open `url` in headless Edge and return `expression` evaluated there, or None."""
+    import asyncio
+    import socket
+    import urllib.request
+
+    import websockets
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    proc = subprocess.Popen([str(edge), "--headless=new", "--disable-gpu", "--no-first-run",
+                             f"--remote-debugging-port={port}", f"--user-data-dir={profile}", url],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    async def run():
+        ws_url = None
+        for _ in range(60):
+            try:
+                tabs = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2).read())
+                pages = [t for t in tabs if t.get("type") == "page" and t.get("url", "").startswith("file:")]
+                if pages:
+                    ws_url = pages[0]["webSocketDebuggerUrl"]
+                    break
+            except OSError:
+                pass
+            await asyncio.sleep(0.25)
+        if not ws_url:
+            return None
+        async with websockets.connect(ws_url, max_size=10_000_000) as ws:
+            for attempt in range(40):
+                await ws.send(json.dumps({"id": attempt + 1, "method": "Runtime.evaluate",
+                                          "params": {"expression": expression, "returnByValue": True}}))
+                while True:
+                    msg = json.loads(await ws.recv())
+                    if msg.get("id") == attempt + 1:
+                        break
+                value = ((msg.get("result") or {}).get("result") or {}).get("value")
+                if value:
+                    return value
+                await asyncio.sleep(0.25)
+        return None
+
+    try:
+        return asyncio.run(run())
+    finally:
+        # Edge's renderer and GPU helpers outlive the main process unless the tree is stopped.
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
 
 
 if __name__ == "__main__":

@@ -8,24 +8,40 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+import urllib.parse
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import bulk_input, candidate_search, engines, library, sessions, settings as settings_mod
-from . import remote_access, tunnel
+from . import power, remote_access, tunnel
 from . import spotify_resolver as sr
 from .jobs import JobManager
 
-# Per-session UI preferences (in-memory). Visitors only ever change these — never the
-# server's config.json. See settings.SESSION_PREF_KEYS.
+# Per-session UI preferences (in-memory), hosted mode only. Visitors only ever change these
+# — never the server's config.json. See settings.SESSION_PREF_KEYS.
 SESSION_PREFS: dict[str, dict] = {}
+
+
+def _prefs(request: Request) -> dict | None:
+    """This visitor's preference overrides, or None to use config.json as-is.
+
+    A local install has one owner, so its settings are simply config.json. Keeping them per
+    browser session there meant the Mac and the PC each had their own naming and format
+    settings — files downloaded from one were named differently from the other, which brings
+    duplicates back — and both were forgotten whenever OmniDL restarted.
+    """
+    if settings_mod.LOCAL_MODE:
+        return None
+    return SESSION_PREFS.get(_sid(request))
 
 # create_subprocess_exec needs the Proactor loop on Windows.
 if sys.platform == "win32":
@@ -105,6 +121,22 @@ async def _watch_for_access_app() -> None:
         await asyncio.sleep(60)
 
 
+def _sweep_temp(max_age: float = 86400) -> None:
+    """Delete Save zips and download reports left in Temp by an interrupted run.
+
+    Both are normally removed as soon as they've been used, but a cancelled download of a big
+    zip, or a crash mid-job, leaves them behind — and Save zips can be gigabytes.
+    """
+    root = Path(tempfile.gettempdir())
+    now = time.time()
+    for path in [*root.glob("omnidl_zip_*.zip"), *(root / "omnidl-produced").glob("*.txt")]:
+        try:
+            if now - path.stat().st_mtime > max_age:
+                path.unlink()
+        except OSError:
+            pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global ACCESS
@@ -112,7 +144,9 @@ async def lifespan(app: FastAPI):
     _log_cookie_health()
     _log_pot_provider()
     _log_ytdlp_age()
+    _sweep_temp()
     running_tunnel = None
+    keep_awake = None
     if settings_mod.LOCAL_MODE:
         cfg = remote_access.load_config()
         ACCESS = remote_access.AccessVerifier.from_config()
@@ -122,9 +156,20 @@ async def lifespan(app: FastAPI):
                   "are refused until one protects this address.")
         if ACCESS.hostname:
             asyncio.create_task(_watch_for_access_app())
+        # Hold off sleep while downloads run, and — unless remote.json says "keep_awake": false —
+        # for as long as remote access is on, since a sleeping PC can't be reached or woken.
+        stay_up_for_remote = bool(running_tunnel) and cfg.get("keep_awake", True) is not False
+        keep_awake = power.KeepAwake(
+            lambda: stay_up_for_remote or any(j.status in ("running", "queued") for j in list(manager.jobs.values())))
+        keep_awake.start()
+        if stay_up_for_remote and keep_awake.needed():
+            print("[OmniDL] Keeping the PC awake while remote access is on (the screen can still "
+                  'turn off). Set "keep_awake": false in remote.json to allow sleep.')
     try:
         yield
     finally:
+        if keep_awake:
+            keep_awake.stop()
         if running_tunnel:
             running_tunnel.stop()
 
@@ -146,6 +191,22 @@ app = FastAPI(title="OmniDL", lifespan=lifespan)
 app.mount("/static", NoCacheStaticFiles(directory=str(STATIC_DIR)), name="static")
 
 _NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+# Windows' MIME table doesn't know .webmanifest, and it would otherwise go out as binary.
+mimetypes.add_type("application/manifest+json", ".webmanifest")
+
+_NOT_FOUND_PAGE = """<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Not found - OmniDL</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<style>
+:root{color-scheme:dark;--bg:#0a0c10;--fg:#e6edf3;--dim:#8a97a8;--accent:#5b8cff}
+@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#eef1f7;--fg:#1a2230;--dim:#5b6675}}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--fg);
+font:16px/1.5 system-ui,-apple-system,sans-serif;padding:0 20px}
+main{max-width:30rem;text-align:center}h1{font-size:1.5rem;margin:.4rem 0}p{color:var(--dim)}
+a{color:var(--accent);font-weight:600;text-decoration:none;margin:0 .6rem}a:hover{text-decoration:underline}
+</style><main><img src="/static/favicon.svg" width="48" height="48" alt="">
+<h1>There's nothing at this address</h1><p>The link may be old, or mistyped.</p>
+<p><a href="/dashboard">Open the dashboard</a><a href="/">Home</a></p></main></html>"""
 
 
 @app.middleware("http")
@@ -161,19 +222,54 @@ async def session_middleware(request: Request, call_next):
         response.set_cookie(
             sessions.COOKIE_NAME, sessions.sign(sid),
             max_age=sessions.COOKIE_MAX_AGE, httponly=True, samesite="lax",
-            secure=sessions.COOKIE_SECURE,
+            # Through the tunnel the page is HTTPS, so the cookie can be HTTPS-only there
+            # while still working on plain http://127.0.0.1 at the PC.
+            secure=sessions.COOKIE_SECURE or bool(getattr(request.state, "remote", False)),
         )
     return response
 
 
-async def _remote_refusal(headers, cookies) -> str | None:
+_LOOPBACK_NAMES = {"127.0.0.1", "localhost", "[::1]"}
+# X-Frame-Options: any site could otherwise load the dashboard in an invisible frame and trick
+# you into clicking its buttons (clickjacking). nosniff + same-origin referrers are the rest of
+# the usual baseline; the referrer one also keeps your tunnel address out of other sites' logs.
+_SECURITY_HEADERS = {"X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff",
+                     "Referrer-Policy": "same-origin"}
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _host_name(host: str) -> str:
+    """The name part of a Host header, lowercased, without the port."""
+    host = (host or "").strip().lower()
+    if host.startswith("["):
+        return host.split("]", 1)[0] + "]"
+    return host.rsplit(":", 1)[0]
+
+
+async def _local_refusal(headers, cookies, method: str = "GET", websocket: bool = False) -> str | None:
     """Why a request must be refused, or None if it may proceed.
 
-    Only local mode needs this: it trusts every caller completely, which is right for
-    127.0.0.1 and wrong for anything the tunnel brings in. Hosted mode has its own gate and
-    sits behind Cloudflare legitimately, so it is left alone.
+    Only local mode needs this: it trusts every caller completely, which is right for you at
+    the PC and wrong for anyone else who can make a request land on 127.0.0.1. Hosted mode
+    has its own gate and sits behind Caddy and Cloudflare legitimately, so it is left alone.
     """
-    if not settings_mod.LOCAL_MODE or not remote_access.came_through_cloudflare(headers):
+    if not settings_mod.LOCAL_MODE:
+        return None
+    # DNS rebinding: a web page on evil.example can repoint its own name at 127.0.0.1 and then
+    # talk to OmniDL "same-origin" — read settings, change the download folder, queue jobs.
+    # The browser still sends Host: evil.example, so only OmniDL's own names are answered.
+    host = headers.get("host", "")
+    name = _host_name(host)
+    if name not in _LOOPBACK_NAMES and not (ACCESS.hostname and name == ACCESS.hostname.lower()):
+        return "This address isn't one OmniDL answers to."
+    # Cross-site requests: any page you visit can submit a form to 127.0.0.1, and WebSockets
+    # ignore cross-origin rules entirely (any site could read the live feed). Browsers say
+    # where such a request came from, so anything that changes state must come from our own page.
+    origin = headers.get("origin")
+    if origin is not None and (websocket or method.upper() not in _SAFE_METHODS):
+        if urllib.parse.urlsplit(origin).netloc.lower() != host.strip().lower():
+            return "Requests from other websites aren't allowed."
+    if not remote_access.came_through_cloudflare(headers):
         return None
     try:
         await ACCESS.verify(remote_access.token_from(headers, cookies))
@@ -185,14 +281,17 @@ async def _remote_refusal(headers, cookies) -> str | None:
 # Defined after session_middleware so it wraps it: a refused request gets no session at all.
 @app.middleware("http")
 async def remote_access_guard(request: Request, call_next):
-    problem = await _remote_refusal(request.headers, request.cookies)
+    problem = await _local_refusal(request.headers, request.cookies, request.method)
     if problem:
         if request.url.path.startswith("/api/"):
             return JSONResponse({"error": problem}, status_code=403, headers=_NO_CACHE)
         return HTMLResponse(remote_access.REFUSED_PAGE.format(message=html.escape(problem)),
                             status_code=403, headers=_NO_CACHE)
     request.state.remote = settings_mod.LOCAL_MODE and remote_access.came_through_cloudflare(request.headers)
-    return await call_next(request)
+    response = await call_next(request)
+    for name, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    return response
 
 
 def _sid(request: Request) -> str:
@@ -236,6 +335,16 @@ def _page(name: str) -> HTMLResponse:
     return HTMLResponse(html, headers=_NO_CACHE)
 
 
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException):
+    """A page for people, JSON for the API — a mistyped address used to show {"detail":...}."""
+    path = request.url.path
+    if exc.status_code == 404 and not path.startswith(("/api/", "/static/", "/ws")):
+        return HTMLResponse(_NOT_FOUND_PAGE, status_code=404, headers=_NO_CACHE)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code,
+                        headers=getattr(exc, "headers", None))
+
+
 @app.get("/robots.txt")
 async def robots():
     """Keep the downloader out of search indexes — it's a personal tool, not something that
@@ -275,24 +384,26 @@ async def terms():
 
 @app.get("/api/settings")
 async def get_settings(request: Request):
-    return settings_mod.public_settings(SESSION_PREFS.get(_sid(request)))
+    return settings_mod.public_settings(_prefs(request))
 
 
 @app.post("/api/settings")
 async def post_settings(request: Request, payload: dict):
-    sid = _sid(request)
-    prefs = SESSION_PREFS.setdefault(sid, {})
-    prefs.update(settings_mod.clean_session_prefs(payload))
-    # In local (personal) mode the user may also set their own output folder + cookies file.
+    cleaned = settings_mod.clean_session_prefs(payload)
     if settings_mod.LOCAL_MODE:
-        updates = {}
-        if payload.get("output_dir"):
-            updates["output_dir"] = payload["output_dir"]
+        # Your own install: save everything to config.json, so every device you use it from
+        # shares one set of settings and they survive a restart. The output folder and cookie
+        # file are only settable here, never on a public server.
+        updates = dict(cleaned)
+        if isinstance(payload.get("output_dir"), str) and payload["output_dir"].strip():
+            updates["output_dir"] = payload["output_dir"].strip()
         if "cookie_file" in payload and isinstance(payload["cookie_file"], str):
             updates["cookie_file"] = payload["cookie_file"].strip()
         if updates:
             settings_mod.save_settings(updates)
-    result = settings_mod.public_settings(prefs)
+    else:
+        SESSION_PREFS.setdefault(_sid(request), {}).update(cleaned)
+    result = settings_mod.public_settings(_prefs(request))
     if settings_mod.LOCAL_MODE and result.get("cookie_file"):
         status = settings_mod.cookie_file_status(result["cookie_file"])
         if status:
@@ -315,6 +426,7 @@ async def meta(request: Request):
         "max_concurrency": settings_mod.MAX_CONCURRENCY,
         "naming_orders": settings_mod.NAMING_ORDERS,
         "naming_artists": settings_mod.NAMING_ARTISTS,
+        "frozen": bool(engines.FROZEN),
         "ytdlp_version": engines.ytdlp_version(),
         "ytdlp_age_days": engines.ytdlp_age_days(),
         # Access gate: `gated` tells the UI to expect locked sources at all; `unlocked` is
@@ -461,7 +573,7 @@ async def download(request: Request, payload: dict):
     limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
-    s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
+    s = settings_mod.effective_settings(_prefs(request))
     _apply_mode(s, payload)
     job = await manager.submit(text, s, sid, override, ip=ip)
     return job.to_dict()
@@ -551,7 +663,7 @@ async def bulk_download(request: Request, payload: dict):
     limit = manager.check_limit(sid, ip, unlimited=owner)
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
-    s = settings_mod.effective_settings(SESSION_PREFS.get(sid))
+    s = settings_mod.effective_settings(_prefs(request))
     _apply_mode(s, {"format": payload.get("format")})
 
     jobs, held_back = [], 0
@@ -590,7 +702,7 @@ async def retry_job(request: Request, job_id: str):
     limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
-    result = await manager.retry(job_id, sid, settings_mod.effective_settings(SESSION_PREFS.get(sid)), ip=ip)
+    result = await manager.retry(job_id, sid, settings_mod.effective_settings(_prefs(request)), ip=ip)
     if isinstance(result, str):
         return JSONResponse({"error": result}, status_code=400)
     return result.to_dict()
@@ -691,11 +803,63 @@ async def open_folder():
     return {"ok": True, "path": path}
 
 
+@app.post("/api/maintenance/update-ytdlp")
+async def update_ytdlp():
+    """Upgrade yt-dlp in place — local installs only.
+
+    YouTube breaks old yt-dlp releases outright, and the server copy updates itself daily but a
+    PC doesn't. This makes the fix one click instead of a terminal command.
+    """
+    if not settings_mod.LOCAL_MODE:
+        return JSONResponse({"error": "Only available on your own install."}, status_code=403)
+    if engines.FROZEN:
+        return JSONResponse({"error": "This app bundles its own yt-dlp — update it by rebuilding "
+                                      "with build_exe.bat."}, status_code=400)
+    if any(job.status in ("running", "queued") for job in list(manager.jobs.values())):
+        # A running download holds yt-dlp.exe open, and Windows won't let pip replace it.
+        return JSONResponse({"error": "Wait for the current downloads to finish, then try again."},
+                            status_code=409)
+    before = engines.ytdlp_version()
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, "-m", "pip", "install", "--upgrade", "--disable-pip-version-check",
+             "yt-dlp", "yt-dlp-ejs"],
+            capture_output=True, text=True, timeout=600)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return JSONResponse({"error": f"Update didn't run: {exc}"}, status_code=500)
+    engines._YTDLP_AGE_CACHE.clear()
+    after = engines.ytdlp_version()
+    if result.returncode != 0:
+        lines = [line for line in (result.stderr or result.stdout or "").splitlines() if line.strip()]
+        return JSONResponse({"error": "Update failed: " + (lines[-1] if lines else "pip error")},
+                            status_code=500)
+    return {"before": before, "after": after, "changed": before != after,
+            "age_days": engines.ytdlp_age_days()}
+
+
+@app.get("/api/jobs/{job_id}/report")
+async def job_report(request: Request, job_id: str):
+    """A job's review report, so tracks that need a look can be checked from any device —
+    before, it existed only as a file in the PC's music folder."""
+    job = _owned(request, job_id)
+    if job is None or not job.report_path or not Path(job.report_path).is_file():
+        return JSONResponse({"error": "no review report for this job"}, status_code=404)
+    # The report shows titles from YouTube and SoundCloud. They're escaped when it's written,
+    # but it's served from OmniDL's own origin, so it also gets no way to call OmniDL's API
+    # (connect-src/form-action 'none') in case anything ever slipped through.
+    headers = dict(_NO_CACHE)
+    headers["Content-Security-Policy"] = ("default-src 'none'; style-src 'unsafe-inline'; "
+                                          "script-src 'unsafe-inline'; img-src https: data:; "
+                                          "connect-src 'none'; form-action 'none'; base-uri 'none'")
+    return FileResponse(job.report_path, media_type="text/html; charset=utf-8", headers=headers)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     # HTTP middleware never sees WebSocket upgrades, so the live feed is guarded here too —
     # otherwise anyone could watch the job log and file names without logging in.
-    if await _remote_refusal(websocket.headers, websocket.cookies):
+    if await _local_refusal(websocket.headers, websocket.cookies, websocket=True):
         await websocket.close(code=1008)
         return
     await websocket.accept()

@@ -214,11 +214,12 @@ function updateChip() {
   const engine = override === "auto" ? detectEngine(text) : override;
   updateMediaToggle(engine);
   if (!engine) {
-    chip.className = "chip";
-    chip.textContent = "—";
-    hint.textContent = "";
+    // Nothing typed: no engine to name, so a short tip instead of an empty "—" chip.
+    chip.hidden = true;
+    hint.textContent = "Spotify, YouTube and SoundCloud links, or a song name. ☰ Bulk takes a whole list.";
     return;
   }
+  chip.hidden = false;
   const wantsVideo = state.mediaType === "video" && videoSupported(engine);
   // Typed text in audio mode is matched as a song across services (the same matcher as
   // playlists and Bulk), not handed to one tool — say so instead of "YouTube · yt-dlp".
@@ -253,7 +254,14 @@ function updateChip() {
 }
 
 /* ---------------- toasts ---------------- */
+const recentToasts = new Map();
+
 function toast(message, kind = "info", ms = 3200) {
+  // The same message twice in a few seconds (e.g. a connection problem reported by both the
+  // request helper and the button that used it) shows once.
+  const now = Date.now();
+  if (now - (recentToasts.get(message) || 0) < 4000) return;
+  recentToasts.set(message, now);
   const el = document.createElement("div");
   el.className = "toast " + kind;
   el.textContent = message;
@@ -337,6 +345,14 @@ function renderQueue() {
           window.location.href = `/api/jobs/${id}/file`;
         }, "save-btn"));
       }
+      if (job.has_report) {
+        // Tracks saved for review or not found. The report used to exist only as a file in
+        // the PC's music folder; now it opens from any device.
+        const n = job.review_count || 0;
+        actions.append(makeButton(n ? `⚠ Review ${n}` : "⚠ Review",
+                                  "Open the review report: tracks to check or that weren't found",
+                                  () => window.open(`/api/jobs/${id}/report`, "_blank", "noopener"), "review-btn"));
+      }
       if (job.status === "error" || job.status === "cancelled") {
         actions.append(makeButton("↻ Retry", "Run again", () => retryJob(job), "btn-retry"));
       }
@@ -344,6 +360,15 @@ function renderQueue() {
     }
     metaRow.append(tool, actions);
     li.append(top, metaRow);
+
+    if (job.status === "error" && job.note) {
+      // Why it failed, without opening the log.
+      const note = document.createElement("div");
+      note.className = "job-note";
+      note.textContent = job.note.charAt(0).toUpperCase() + job.note.slice(1);
+      note.title = job.note;
+      li.append(note);
+    }
 
     if (job.status === "running") {
       const prog = document.createElement("div");
@@ -522,7 +547,19 @@ async function api(path, method = "GET", body) {
     opts.headers = { "Content-Type": "application/json" };
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  let res;
+  try {
+    res = await fetch(path, opts);
+  } catch (_) {
+    // A failed fetch used to be swallowed, so every button just silently did nothing. Through
+    // the tunnel this is usually the PC being off/asleep, or the Cloudflare login expiring
+    // (its redirect to the login page is cross-origin, which fetch reports as a failure).
+    const msg = state.meta.remote
+      ? "Can't reach your home PC — it may be off or asleep, or your Cloudflare login expired. Reload to sign in again."
+      : "Can't reach OmniDL — is it still running?";
+    toast(msg, "error", 8000);
+    return { error: msg, offline: true };
+  }
   return res.json().catch(() => ({}));
 }
 
@@ -1000,11 +1037,42 @@ function canSave() {
   return !state.meta.local || !!state.meta.remote;
 }
 
+function showYtdlpStatus(version, age) {
+  const el = $("#ytdlp-status");
+  if (!el) return;
+  el.textContent = version ? `${version}${age != null ? ` · ${age} day${age === 1 ? "" : "s"} old` : ""}` : "unknown";
+  el.classList.toggle("stale", age != null && age > 21);
+}
+
+async function updateYtdlp() {
+  const btn = $("#update-ytdlp");
+  btn.disabled = true;
+  btn.textContent = "Updating…";
+  const res = await api("/api/maintenance/update-ytdlp", "POST");
+  btn.disabled = false;
+  btn.textContent = "Update yt-dlp";
+  if (!res || res.error) { if (res && !res.offline) toast(res.error, "error", 7000); return; }
+  showYtdlpStatus(res.after, res.age_days);
+  state.meta.ytdlp_version = res.after;
+  state.meta.ytdlp_age_days = res.age_days;
+  toast(res.changed ? `yt-dlp updated to ${res.after} — restart OmniDL so searches use it too.`
+                    : `yt-dlp is already the latest (${res.after}).`, "success", 7000);
+}
+
 function syncEnvironmentControls() {
   const local = !!state.meta.local;
+  // Only a local, non-packaged install can update its own yt-dlp.
+  $("#maintenance").hidden = !local || !!state.meta.frozen;
+  showYtdlpStatus(state.meta.ytdlp_version, state.meta.ytdlp_age_days);
+  const scope = $("#settings-scope");
+  if (scope && local) {
+    scope.innerHTML = "These settings are <strong>saved on your PC</strong> and apply wherever " +
+                      "you use OmniDL from — the PC itself, your Mac or your phone.";
+  }
   $("#open-library").hidden = !local;
   // Folder opens Explorer on the PC — invisible and confusing from another device.
   $("#open-folder").hidden = !local || !!state.meta.remote;
+  $("#remote-badge").hidden = !state.meta.remote;
   const hint = $("#hosted-hint");
   if (hint) hint.hidden = local;
 }
@@ -1024,6 +1092,7 @@ function bind() {
   $("#open-settings").onclick = openSettings;
   $("#close-settings").onclick = closeSettings;
   $("#save-settings").onclick = saveSettings;
+  $("#update-ytdlp").onclick = updateYtdlp;
   for (const id of ["#set-naming-order", "#set-naming-artists", "#set-format"]) {
     const el = $(id);
     if (el) el.addEventListener("change", updateNamingPreview);
@@ -1101,10 +1170,10 @@ async function init() {
   });
   // A stale yt-dlp doesn't degrade downloads, it stops them dead (YouTube breaks old
   // releases). The .exe bundles yt-dlp at build time and never self-updates, so say so.
-  if (state.meta.ytdlp_age_days != null && state.meta.ytdlp_age_days > 30) {
-    const how = state.meta.local
-      ? "Update with: pip install -U yt-dlp  (then rebuild the app)"
-      : "The server updates daily — check the health report.";
+  if (state.meta.ytdlp_age_days != null && state.meta.ytdlp_age_days > 21) {
+    const how = !state.meta.local ? "The server updates daily — check the health report."
+      : state.meta.frozen ? "Rebuild the app with build_exe.bat to update it."
+      : "Settings → Maintenance → Update yt-dlp.";
     toast(`⚠ yt-dlp is ${state.meta.ytdlp_age_days} days old (${state.meta.ytdlp_version}). ` +
           `YouTube downloads may fail. ${how}`, "error", 15000);
   }

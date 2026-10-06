@@ -709,3 +709,83 @@ html.light .duplicate-file { background: rgba(255,255,255,.45); }
   .bulk-row input { flex: 1 1 140px; }
   .bulk-label { max-width: 100%; }
 }
+
+/* ---------------- job cards: review + why it failed ---------------- */
+.job-actions .review-btn {
+  color: var(--yellow); font-weight: 700;
+  border-color: color-mix(in srgb, var(--yellow) 45%, var(--border));
+  background: color-mix(in srgb, var(--yellow) 12%, transparent);
+}
+.job-actions .review-btn:hover { border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 24%, transparent); }
+.job-note {
+  margin-top: 6px; font-size: 11px; color: var(--red);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Light mode: the running badge was pale blue on pale blue. */
+html.light .badge.running { background: rgba(37, 99, 235, .12); color: #1d4ed8; }
+html.light .job-actions .review-btn { color: #a16207; }
+
+/* Queue header: the summary drops to its own line rather than squeezing into a two-line pill. */
+.panel-head { flex-wrap: wrap; row-gap: 6px; }
+.panel-head .summary { white-space: nowrap; }
+
+/* "You're on your home PC" — shown only when reached through the tunnel. */
+.remote-badge {
+  display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px;
+  font-size: 11px; font-weight: 700; border-radius: 999px; white-space: nowrap;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+/* ---------------- phones ----------------
+   The desktop layout is a fixed-height app shell with everything in one toolbar row. On a
+   phone that row ran 174px off-screen (Bulk and Download unreachable), crushed the search box
+   to its icon, and left the live output about 100px tall. Here the page scrolls normally and
+   the toolbar becomes a fixed three-row grid. */
+@media (max-width: 760px) {
+  body { height: auto; min-height: 100vh; min-height: 100dvh; overflow-x: hidden; overflow-y: auto; }
+  .smartbar { padding: 12px 12px 4px; }
+  .smartbar-card { padding: 12px; }
+  .smartbar-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 8px; }
+  .input-wrap { grid-column: 1 / -1; }
+  #input { font-size: 16px; }                 /* below 16px iOS zooms the page on focus */
+  #engine, #format { min-width: 0; width: 100%; }
+  #open-bulk { grid-column: 1; }
+  #download { grid-column: 2 / -1; justify-content: center; }
+  .smartbar-meta { flex-wrap: wrap; row-gap: 6px; }
+  .workspace { flex: none; padding: 10px 12px 16px; gap: 12px; }
+  .terminal-wrap { flex: none; height: 55vh; min-height: 300px; }
+  .queue-wrap { flex: none; width: auto; max-height: none; }
+  .queue { overflow: visible; }
+  /* Modals open as a full-width sheet from the bottom, within thumb reach. */
+  .modal { align-items: flex-end; }
+  .modal-box, .bulk-modal-box, .library-modal-box {
+    width: 100%; max-height: 92vh; max-height: 92dvh; border-radius: 16px 16px 0 0;
+  }
+  .remote-badge .remote-text { display: none; }
+}
+@media (max-width: 760px) {
+  /* Give the engine menu the room "Auto-detect" needs; opus/mp3 fit a narrower box. */
+  .smartbar-row { grid-template-columns: minmax(0, 1.35fr) auto minmax(0, .9fr); }
+  #engine, #format { padding-left: 10px; padding-right: 6px; }
+}
+@media (max-width: 560px) {
+  /* Bulk preview on a phone: tag + artist, then the title on its own line, then the label. */
+  .bulk-dash { display: none; }
+  .bulk-row .bulk-title { flex: 1 1 100%; }
+  .bulk-label { flex: 1 1 100%; padding-left: 2px; }
+}
+
+/* Job cards: with Save and Review side by side, the buttons were squeezed into tall boxes with
+   wrapped text. Buttons keep one line; the row wraps the buttons below the source if needed. */
+.job-meta { flex-wrap: wrap; row-gap: 6px; }
+.job-actions { margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+.job-actions button { white-space: nowrap; }
+
+/* Settings: maintenance */
+.maint-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.maint-row > span { flex: 1; color: var(--text); font-size: 13px; }
+.maint-why { display: block; margin-top: 2px; }
+#ytdlp-status.stale { color: var(--yellow); font-weight: 700; }
+#update-ytdlp { flex: none; white-space: nowrap; }

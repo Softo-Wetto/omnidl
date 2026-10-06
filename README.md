@@ -70,12 +70,24 @@ downloading from your home connection.
 
 **Using it:** start OmniDL on the PC as usual. It starts the tunnel itself (the console shows
 `Remote access: connected`), and the tunnel stops when OmniDL does. Open the address on the
-other device and sign in with Cloudflare Access (an emailed one-time code). The PC has to
-stay on and awake.
+other device and sign in with Cloudflare Access (an emailed one-time code). A **🏠 Home PC**
+badge in the header shows you're controlling the PC remotely.
 
 From another device, downloads still go into your PC's library as normal, and each finished
 job gets a **⤓ Save** button for a copy on the device you're using. *Folder* is hidden there,
-since it would open Explorer on the PC.
+since it would open Explorer on the PC. Settings are saved on the PC, so they're the same
+whichever device you change them from.
+
+**Staying reachable.** While remote access is on, OmniDL stops Windows from *sleeping* (a
+sleeping PC can't be reached or woken from the Mac); the screen can still turn off. It also
+holds off sleep while any download is running, wherever it was started. To allow sleep while
+idle, add `"keep_awake": false` to `remote.json`.
+
+**Install it like an app.** On the Mac, Safari → *File → Add to Dock* (or Chrome/Edge →
+*Install*); on a phone, *Add to Home Screen*. It opens in its own window with its own icon.
+
+If the PC goes off or your Cloudflare login expires, the dashboard says so instead of buttons
+silently doing nothing — reload to sign in again.
 
 **How it's kept private.** At the PC, OmniDL trusts every request completely — no passphrase,
 no limits, settings that write files — because only you can reach `127.0.0.1`. The tunnel
@@ -91,6 +103,12 @@ trust. Two locks, either of which is enough on its own:
 
 OmniDL learns which Access app to trust from Cloudflare itself (the login redirect for the
 address), so no IDs are copied around. Using it at the PC needs no login.
+
+The local app is also protected from the websites *you* visit, tunnel or not: it only answers
+to its own names (`127.0.0.1`, `localhost`, the tunnel address), which stops DNS-rebinding
+pages from taking it over; anything that changes state — and the live-output socket, which
+browsers don't otherwise restrict — must come from OmniDL's own page; and no page may embed it
+in a frame (clickjacking).
 
 **Set-up (once):**
 
@@ -119,7 +137,8 @@ address), so no IDs are copied around. Using it at the PC needs no login.
    only your email. Until this exists, remote visitors get a "This OmniDL is locked" page.
 
 **Notes.** cloudflared runs with `--no-autoupdate` (a self-replacing binary would escape the
-supervisor); update it by downloading the new release over the old file. Its log is
+supervisor); update it by downloading the new release over the old file — OmniDL warns at
+startup once it's six months old, before Cloudflare stops accepting it. Its log is
 `cloudflared.log` beside `config.json`. If you change OmniDL's port (`OMNIDL_PORT`), change
 `service:` in the tunnel config to match. Big **Save** zips are built before sending, and
 Cloudflare drops a response that hasn't started within 100 s — fine for hundreds of tracks,
@@ -154,6 +173,12 @@ but not for a whole multi-gigabyte library at once.
 - **Persistent history** — your queue/history and each job's log are saved to `history.json`
   and restored on restart. Jobs that were mid-download when the app closed show as
   *cancelled (interrupted)*.
+- **At-a-glance results** — a finished job with tracks to check shows **⚠ Review N**, which
+  opens its review report from any device; a failed job shows why on its card (e.g. "YouTube
+  bot check - cookies needed") without opening the log.
+- **Keeping yt-dlp current** — YouTube breaks old yt-dlp releases outright. On your own install,
+  *Settings → Maintenance → Update yt-dlp* upgrades it in one click (after downloads finish);
+  you're warned once it's three weeks old.
 - **Light / dark theme** — the ☀ / 🌙 button in the top bar toggles a light theme; your
   choice is remembered and applied with no flash on reload.
 

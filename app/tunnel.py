@@ -11,17 +11,46 @@ config file; nothing happens without it.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from datetime import date
 from pathlib import Path
 
 from .settings import PROJECT_ROOT
 
 LOG_PATH = PROJECT_ROOT / "cloudflared.log"
 _BACKOFF_MAX = 60
+# cloudflared runs with self-update off (see Tunnel), and Cloudflare stops accepting releases
+# about a year old — remote access would then just stop one day. Warn well before that.
+_STALE_DAYS = 180
+_BUILT_RE = re.compile(r"built (\d{4})-(\d{2})-(\d{2})")
+
+
+def cloudflared_age_days(version_text: str) -> int | None:
+    """Days since the cloudflared in `version_text` ("... (built 2026-09-24T08:31 UTC)") was built."""
+    m = _BUILT_RE.search(version_text or "")
+    if not m:
+        return None
+    try:
+        return (date.today() - date(int(m.group(1)), int(m.group(2)), int(m.group(3)))).days
+    except ValueError:
+        return None
+
+
+def _warn_if_stale(exe: str) -> None:
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    age = cloudflared_age_days(out.stdout + out.stderr)
+    if age is not None and age > _STALE_DAYS:
+        print(f"[OmniDL] Remote access: cloudflared is {age} days old. Cloudflare retires old "
+              f"releases, so download the latest over {exe} before it stops connecting.")
 
 
 def find_cloudflared(configured: str = "") -> str | None:
@@ -121,6 +150,7 @@ class Tunnel:
             self._thread.join(timeout=8)
 
     def _supervise(self) -> None:
+        _warn_if_stale(self.exe)            # here, not at startup: it shouldn't delay the server
         delay = 5
         while not self._stopping.is_set():
             started = time.monotonic()
