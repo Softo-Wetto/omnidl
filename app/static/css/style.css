@@ -981,3 +981,5 @@ html.light .badge.issues { color: #8a5d00; }
   .bulk-row .bulk-title { order: 2; }
   .bulk-row .bulk-label { order: 3; }
 }
+.job-note.info { color: var(--yellow); }
+html.light .job-note.info { color: #8a5d00; }

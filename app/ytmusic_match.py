@@ -19,13 +19,18 @@ def _get_client():
 
 def search_songs(artist: str, title: str, limit: int = 5) -> list[dict]:
     """Return raw YouTube Music song results without choosing a candidate."""
+    try:
+        return search_songs_or_raise(artist, title, limit)
+    except Exception:
+        return []
+
+
+def search_songs_or_raise(artist: str, title: str, limit: int = 5) -> list[dict]:
+    """Like search_songs, but a failed request raises instead of looking like "no results"."""
     query = f"{artist} {title}".strip()
     if not query:
         return []
-    try:
-        return _get_client().search(query, filter="songs", limit=limit) or []
-    except Exception:
-        return []
+    return _get_client().search(query, filter="songs", limit=limit) or []
 
 
 def best_match(artist: str, title: str, duration: int = 0, limit: int = 5) -> str | None:

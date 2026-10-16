@@ -65,7 +65,8 @@ Launching it again is safe. If OmniDL is already running it just opens it; if it
 the code has been updated, it's shut down cleanly and restarted; if it's busy downloading it's
 left alone (`python run.py --restart` restarts it anyway, cancelling cleanly). If some
 *other* program is using the port, OmniDL says so and leaves it running — set
-`OMNIDL_PORT=8001` to use another port.
+`OMNIDL_PORT=8001` to use another port. A restart doesn't wait on dashboard tabs left open
+(here or on another device): they're told the server is restarting and reconnect by themselves.
 
 ## Use your home OmniDL from anywhere (Cloudflare Tunnel)
 
@@ -146,12 +147,19 @@ in a frame (clickjacking).
 supervisor); update it by downloading the new release over the old file — OmniDL warns at
 startup once it's six months old, before Cloudflare stops accepting it. Its log is
 `cloudflared.log` beside `config.json`. If you change OmniDL's port (`OMNIDL_PORT`), change
-`service:` in the tunnel config to match. Big **Save** zips are built before sending (in
-the background, two at a time, so the rest of OmniDL stays responsive), and Cloudflare drops a
-response that hasn't started within 100 s — fine for hundreds of tracks, but not for a whole
-multi-gigabyte library at once. **Save** also covers songs a re-run found already in your
-library (in any format), and a job that failed or was cancelled part-way offers **Save available
-files (N)** for whatever it finished.
+`service:` in the tunnel config to match.
+
+**Save** streams the zip as it's built, so the download starts straight away whatever its size
+(Cloudflare cuts off a response that hasn't started within 100 s), shows real progress, and
+needs no temporary copy on the PC. Archives over 4 GB use ZIP64. Two Saves send at a time; the
+rest of OmniDL stays responsive meanwhile. **Save** also covers songs a re-run found already in
+your library (in any format), and a job that failed or was cancelled part-way offers **Save
+available files (N)** for whatever it finished.
+
+Remote logins carry a validity window, so the PC's clock matters. OmniDL allows 10 minutes of
+drift and warns at startup when the clock is off by more than a minute — if it does, turn on
+Windows' time sync (*Settings → Time & language → Date & time*; the *Windows Time* service has
+to be enabled).
 
 ## Usage
 
@@ -268,7 +276,10 @@ same matcher. That's deliberate: typed searches used to take YouTube's #1 result
 which usually meant the music video (intros, skits, sometimes a live cut), so the same song
 could come back as a different version depending on how you asked for it.
 
-1. **Search** YouTube Music (official audio), YouTube and SoundCloud.
+1. **Search** YouTube Music (official audio), YouTube and SoundCloud. If nothing verifies,
+   search again in other words — the plain song name without `feat.`/`Remastered`/brackets,
+   twice as many results, audio uploads first — before giving up. A search that doesn't answer
+   (a rate limit, a dropped connection) is remembered as such, not as "not found".
 2. **Score** each result on artist, title and length. Credits and upload decorations don't
    count against a match — `Payphone (feat. Wiz Khalifa)`, `Drake - One Dance (Lyrics)` and
    `Justin Bieber, Nicki Minaj – Beauty And A Beat` all name the song — and the artist is read
@@ -287,7 +298,10 @@ could come back as a different version depending on how you asked for it.
    Anything that can't be confirmed as this exact song and version isn't downloaded; it goes to
    the review report with its closest candidates and their links. If the right match won't
    download — YouTube throttles busy downloads — only the *same recording* from another source
-   may stand in. Otherwise the track fails *and is retried* after the rest, one at a time.
+   may stand in. Otherwise the track fails *and is retried* after the rest, one at a time —
+   and once more after a short break. Failed searches are retried the same way. When YouTube
+   says to slow down (HTTP 429, "confirm you're not a bot"), every download in the job pauses
+   (30 s, growing to 3 min) instead of failing the rest of the list one after another.
 
 On 120 real songs checked against Spotify's own lengths (an offline benchmark of the actual
 search results), strict matching downloaded the right version for 120/120 playlist tracks,
@@ -324,10 +338,15 @@ YT Music official audio is the closest clean equivalent. Optionally enable **Tri
 segments** (SponsorBlock) for any source that still has intro/outro chatter.
 
 **Big playlists (100+).** The embed page only lists 100 tracks, so OmniDL also reads
-Spotify's *own* anonymous web-player token (embedded in that page) to page through the full
-track list via `api.spotify.com`. That token is minted by Spotify's first-party app, so it
-isn't subject to the "app owner must be Premium" block. If it's ever unavailable it falls
-back to the first 100 from the embed.
+Spotify's *own* anonymous web-player token (embedded in that page) and pages through the full
+track list with the web player's own API, 100 at a time. That token is minted by Spotify's
+first-party app, so it isn't subject to the "app owner must be Premium" block. A page that
+fails is retried with back-off (and Spotify's query id re-read if it has rotated); if one keeps
+failing, everything fetched before it is still downloaded and the job says **Completed with
+issues — Spotify returned only the first N tracks** rather than quietly stopping at 100.
+Checked on real playlists of 150 and 200 tracks (all read in 2–4 s); a 650-track list with a
+rate-limited page is covered by the tests. The card counts as it goes ("57 saved · 2 not
+found — 250 tracks").
 
 **Real Spotify tags.** When the token path is used, OmniDL also gets each track's album,
 track number, and cover art, and writes them onto the file with `mutagen` (overriding the

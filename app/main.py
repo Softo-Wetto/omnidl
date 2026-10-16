@@ -10,23 +10,26 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 import urllib.parse
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse, PlainTextResponse,
+                               StreamingResponse)
 from fastapi.staticfiles import StaticFiles
-from starlette.background import BackgroundTask
+from starlette.concurrency import iterate_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import bulk_input, candidate_search, engines, instance, library, sessions, settings as settings_mod
-from . import power, remote_access, tunnel
+from . import compat, power, remote_access, tunnel, zipstream
 from . import spotify_resolver as sr
 from .jobs import JobManager
+
+compat.fix_uvicorn_shutdown()
 
 # Per-session UI preferences (in-memory), hosted mode only. Visitors only ever change these
 # — never the server's config.json. See settings.SESSION_PREF_KEYS.
@@ -857,38 +860,36 @@ async def job_file(request: Request, job_id: str):
 
     base = (job.list_name or job.label or job.input or "omnidl").rsplit("/", 1)[-1]
     zip_name = f"{_safe_name(base)[:60] or 'omnidl'}.zip"
-    tmp = tempfile.NamedTemporaryFile(prefix="omnidl_zip_", suffix=".zip", delete=False)
-    tmp.close()
-    tmp_path = Path(tmp.name)
-    # Reading gigabytes into a zip on the event loop froze everything else — live progress,
-    # Cancel, other devices — until it finished. It runs on a worker thread instead, and only
-    # a couple at once so several Saves can't saturate the disk together.
     try:
-        async with _ZIP_SLOTS:
-            await asyncio.to_thread(_write_zip, tmp_path, files)
-    except Exception as exc:  # noqa: BLE001
-        tmp_path.unlink(missing_ok=True)
+        plan = await asyncio.to_thread(zipstream.ZipPlan, files)
+    except OSError as exc:
         return JSONResponse({"error": f"Couldn't prepare the zip: {exc}"}, status_code=500)
-    return FileResponse(
-        str(tmp_path), media_type="application/zip", filename=zip_name,
-        background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
-    )
+
+    # Streamed as it's built (see zipstream): the download starts at once — through the
+    # tunnel a response must start within 100s — and no temp copy of a big playlist is made.
+    # Reading runs on worker threads so the app stays responsive, and only two Saves send at
+    # a time so several can't saturate the disk together.
+    async def body():
+        chunks = plan.chunks()
+        try:
+            async with _ZIP_SLOTS:
+                async for chunk in iterate_in_threadpool(chunks):
+                    yield chunk
+        finally:
+            # The browser may stop half-way: close the file being read now, not whenever
+            # the garbage collector gets to it (an open file can't be deleted on Windows).
+            try:
+                chunks.close()
+            except ValueError:            # mid-read on a worker thread; it ends with it
+                pass
+
+    return StreamingResponse(body(), media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="{zip_name}"',
+        "Content-Length": str(plan.length),
+    })
 
 
 _ZIP_SLOTS = asyncio.Semaphore(2)
-
-
-def _write_zip(path: Path, files: list[Path]) -> None:
-    # Stored, not deflated: audio is already compressed, so deflating only costs time — and
-    # through a Cloudflare tunnel the response must start within 100s or it's cut off.
-    used: set[str] = set()
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
-        for f in files:
-            name = f.name
-            if name in used:                       # same name from different folders
-                name = f"{f.parent.name} - {f.name}"
-            used.add(name)
-            zf.write(f, arcname=name)
 
 
 @app.post("/api/open-folder")
@@ -924,6 +925,16 @@ async def instance_info():
             "active": sum(1 for job in list(manager.jobs.values()) if job.status in ("running", "queued"))}
 
 
+_CLOSING: set = set()
+
+
+async def _close_quietly(ws) -> None:
+    try:
+        await ws.close(code=1012)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @app.post("/api/instance/shutdown")
 async def instance_shutdown(request: Request):
     """Stop cleanly so a relaunch can start the latest code: downloads are cancelled properly
@@ -939,9 +950,26 @@ async def instance_shutdown(request: Request):
         if job.status in ("running", "queued"):
             await manager.cancel(job.id, _sid(request))
     manager._persist()
+    # An open dashboard tab holds a live connection, and uvicorn's graceful shutdown waited on
+    # it indefinitely — one tab left open blocked a restart. Close them first, as "service
+    # restart" (1012), so the tabs reconnect to the new instance by themselves.
+    # Not awaited: a tab that doesn't answer (a sleeping laptop) would hold the close
+    # handshake for its full timeout, and responsive ones get the frame straight away.
+    for ws in list(manager.subscribers):
+        manager.subscribers.pop(ws, None)
+        _CLOSING.add(task := asyncio.create_task(_close_quietly(ws)))
+        task.add_done_callback(_CLOSING.discard)
+    loop = asyncio.get_running_loop()
     # After this response is sent: uvicorn treats SIGINT as "shut down gracefully", which also
-    # runs the app's shutdown (stopping the tunnel and the keep-awake hold).
-    asyncio.get_running_loop().call_later(0.5, signal.raise_signal, signal.SIGINT)
+    # runs the app's shutdown (stopping the tunnel and the keep-awake hold). If anything still
+    # holds it up, a second SIGINT tells uvicorn to stop waiting.
+    loop.call_later(0.5, signal.raise_signal, signal.SIGINT)
+    loop.call_later(10.0, signal.raise_signal, signal.SIGINT)
+    # Last resort, so a relaunch is never left facing a half-stopped copy: history is already
+    # saved, and cloudflared lives in a job object that ends with this process.
+    watchdog = threading.Timer(25.0, os._exit, args=(0,))
+    watchdog.daemon = True                  # never what keeps the process alive
+    watchdog.start()
     return {"ok": True}
 
 

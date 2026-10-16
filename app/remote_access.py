@@ -33,7 +33,12 @@ CONFIG_PATH = PROJECT_ROOT / "remote.json"
 
 # DER prefix of the DigestInfo for SHA-256 (RFC 8017 §9.2): what RS256 signs, ahead of the hash.
 _SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
-_CLOCK_SKEW = 60                 # seconds of leeway on exp/nbf
+# Leeway on exp/nbf. Generous on purpose: a home PC's clock drifts (one here was 3 minutes
+# fast with Windows Time disabled), and a slow clock puts a fresh login's `nbf` in the future,
+# so every remote visit failed. Cloudflare's edge has already enforced the login before the
+# request reaches the tunnel; this check is the backstop, and the signature, team and app are
+# still verified exactly.
+_CLOCK_SKEW = 600
 _KEYS_TTL = 3600                 # re-read the team's signing keys hourly (Cloudflare rotates them)
 _REFETCH_GAP = 60                # at most one key refresh a minute, however many bad tokens arrive
 _DISCOVERY_GAP = 10              # at most one Access lookup per 10s

@@ -126,6 +126,32 @@ _ERROR_PATTERNS = (
 )
 
 
+# Errors that mean "slow down" rather than "this video is gone". Retrying straight away just
+# burns through the rest of a big playlist; pausing every download for a while doesn't.
+_RATE_LIMIT_RE = re.compile(r"HTTP Error 429|Too Many Requests|rate.?limit|confirm you.?re not a bot",
+                            re.IGNORECASE)
+_SOURCE_NAMES = {"youtube_music": "YouTube Music", "youtube": "YouTube", "soundcloud": "SoundCloud"}
+
+
+def _tally(outcomes, total: int) -> dict[str, int]:
+    """Per-track results so far: what the card shows, live and at the end."""
+    counts = {"downloaded": 0, "review": 0, "skipped": 0, "failed": 0, "total": total}
+    for outcome in outcomes:
+        if outcome.status in ("downloaded", "downloaded_for_review"):
+            counts["downloaded"] += 1
+            counts["review"] += outcome.status == "downloaded_for_review"
+        elif outcome.status == "skipped":
+            counts["skipped"] += 1
+        else:
+            counts["failed"] += 1
+    return counts
+
+
+def _worth_retrying(outcome) -> bool:
+    return (outcome.status == "download_failed" and bool(outcome.failed_attempts)) or \
+        bool(getattr(outcome, "retryable", False))
+
+
 def _short_error(lines: list[str]) -> str:
     text = "\n".join(lines)
     for pattern, label in _ERROR_PATTERNS:
@@ -314,6 +340,11 @@ class Job:
         # finished business — the card says so and offers to retry just the misses.
         self.counts: dict[str, int] | None = None
         self.failed_tracks: list = []
+        # Set when Spotify wouldn't hand over the whole playlist (see spotify_resolver).
+        self.incomplete_list = False
+        # Rate-limit back-off shared by every download in this job (not persisted).
+        self.pause_until = 0.0
+        self.rate_hits = 0
 
     def append(self, text: str) -> None:
         self.appended += len(text)
@@ -380,6 +411,7 @@ class Job:
             # links, for one, can't be converted to every format.
             "formats": sorted({PurePosixPath(n.replace("\\", "/")).suffix.lower().lstrip(".") for n in names}),
             "counts": self.counts,
+            "incomplete_list": self.incomplete_list,
             "can_retry_failed": finished and bool(self.failed_tracks),
             "list_name": self.list_name,
             # Hosted copies are deleted after FILE_TTL_SECONDS; the card counts down to it.
@@ -442,6 +474,7 @@ class Job:
         job.report_path = rec.get("report_path")
         job.review_count = int(rec.get("review_count") or 0)
         job.note = rec.get("note") or ""
+        job.incomplete_list = bool(rec.get("incomplete_list"))
         counts = rec.get("counts")
         job.counts = ({k: int(v or 0) for k, v in counts.items()} if isinstance(counts, dict) else None)
         job.failed_tracks = [Track(artist=t.get("artist", ""), title=t.get("title", ""),
@@ -940,19 +973,20 @@ class JobManager:
             await self._send(job, {"type": "status", "job": job.to_dict()})
             await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
         if resolved is not None and getattr(resolved, "truncated", False):
-            # Spotify's embed tops out at 100 and its API refused the rest, so this is the
-            # first 100 of a larger playlist. Say so unmistakably rather than let the run
-            # look like a complete playlist.
+            # Spotify kept refusing the rest of the list, so this is the start of a larger
+            # playlist. Say so unmistakably rather than let the run look complete.
             await self._emit(
                 job,
-                "\x1b[33m⚠ Spotify returned only the first 100 tracks of this playlist "
-                "(its API is rate-limiting anonymous requests).\x1b[0m\r\n",
+                f"\x1b[33m⚠ Spotify returned only the first {total} tracks of this playlist "
+                "(it's rate-limiting requests for the rest).\x1b[0m\r\n",
             )
             await self._emit(
                 job,
-                "\x1b[2m   Downloading those 100. Re-run the playlist later for the rest — "
+                f"\x1b[2m   Downloading those {total}. Re-run the playlist later for the rest — "
                 "already-downloaded tracks are skipped.\x1b[0m\r\n",
             )
+            job.note = f"Spotify returned only the first {total} tracks - re-run later for the rest"
+            job.incomplete_list = True
 
         if settings.get("skip_existing", True):
             await self._emit(job, "\x1b[2m   Indexing existing music across folders and formats...\x1b[0m\r\n")
@@ -994,43 +1028,45 @@ class JobManager:
                     done["n"] += 1
                     job.progress = int(done["n"] / total * 100) if total else 100
                     job.label = track.query
-                await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
+                    # Live tally, so a 200-song playlist shows "57 saved · 2 not found" as it goes.
+                    job.counts = _tally(outcomes.values(), total)
+                await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress,
+                                       "label": job.label, "counts": job.counts})
 
         await asyncio.gather(*(handle(i, track) for i, track in enumerate(tracks, start=1)))
 
-        # Retry sweep: tracks that *failed to download* a real match (had attempts) usually
-        # lost a transient YouTube-throttling roll during the burst. Re-try them one at a
-        # time, after the burst, when the throttling has eased — the correct song is there.
-        if job.status != "cancelled":
-            retryable = [i for i, o in outcomes.items()
-                         if o.status == "download_failed" and o.failed_attempts]
-            if retryable:
-                await self._emit(job, f"\r\n\x1b[33m\u21bb retrying {len(retryable)} track(s) that hit YouTube "
-                                       f"throttling \x1b[2m(one at a time)\x1b[0m\r\n")
-                for i in retryable:
-                    if job.status == "cancelled":
-                        break
-                    await asyncio.sleep(4)  # let the rate-limit window pass
-                    retry = await self._fetch_track(job, tracks_by_index[i], settings, True, i, total)
-                    if retry.status != "cancelled":
-                        outcomes[i] = retry
+        # Retry sweeps: a track whose right match wouldn't download, or whose search didn't
+        # answer, usually lost a transient YouTube-throttling roll during the burst. Re-try
+        # them one at a time after the burst — then once more after a longer break — when
+        # the throttling has eased. The correct song is usually there.
+        for sweep, (gap, breather) in enumerate(((4, 0), (8, 20)), start=1):
+            if job.status == "cancelled":
+                break
+            retryable = [i for i, o in sorted(outcomes.items()) if _worth_retrying(o)]
+            if not retryable:
+                break
+            when = "" if sweep == 1 else " after a short break"
+            await self._emit(job, f"\r\n\x1b[33m\u21bb retrying {len(retryable)} track(s) that hit a "
+                                   f"temporary problem{when} \x1b[2m(one at a time)\x1b[0m\r\n")
+            await self._sleep_unless_cancelled(job, breather)
+            for i in retryable:
+                if job.status == "cancelled":
+                    break
+                await self._sleep_unless_cancelled(job, gap)   # let the rate-limit window pass
+                retry = await self._fetch_track(job, tracks_by_index[i], settings, True, i, total)
+                if retry.status != "cancelled":
+                    outcomes[i] = retry
+                    job.counts = _tally(outcomes.values(), total)
+                    await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress,
+                                           "label": job.label, "counts": job.counts})
 
         if job.status != "cancelled":
-            counts = {"ok": 0, "review": 0, "skip": 0, "fail": 0}
-            unresolved: list[TrackOutcome] = []
-            for outcome in outcomes.values():
-                if outcome.status in ("downloaded", "downloaded_for_review"):
-                    counts["ok"] += 1
-                    counts["review"] += outcome.status == "downloaded_for_review"
-                elif outcome.status == "skipped":
-                    counts["skip"] += 1
-                else:
-                    counts["fail"] += 1
-                if outcome.status in ("downloaded_for_review", "no_candidate", "rejected", "download_failed"):
-                    unresolved.append(outcome)
-
-            job.counts = {"downloaded": counts["ok"], "review": counts["review"],
-                          "skipped": counts["skip"], "failed": counts["fail"], "total": total}
+            unresolved: list[TrackOutcome] = [
+                o for o in outcomes.values()
+                if o.status in ("downloaded_for_review", "no_candidate", "rejected", "download_failed")]
+            job.counts = _tally(outcomes.values(), total)
+            counts = {"ok": job.counts["downloaded"], "review": job.counts["review"],
+                      "skip": job.counts["skipped"], "fail": job.counts["failed"]}
             job.failed_tracks = [tracks_by_index[i] for i, o in sorted(outcomes.items())
                                  if o.status in ("no_candidate", "rejected", "download_failed")]
             report_path: Path | None = None
@@ -1052,6 +1088,28 @@ class JobManager:
             # review reported "0 needs review" beside a review report listing all of them.
             review_note = f" \x1b[33m({counts['review']} to review)\x1b[0m" if counts["review"] else ""
             await self._emit(job, f"\r\n\x1b[36m{bar}\x1b[0m\r\n\x1b[1;32m\U00002705 {counts['ok']} downloaded\x1b[0m{review_note} \x1b[2m-\x1b[0m \x1b[33m{counts['skip']} skipped\x1b[0m \x1b[2m-\x1b[0m \x1b[31m{counts['fail']} failed\x1b[0m \x1b[2m({total} total)\x1b[0m{report_suffix}\r\n\x1b[36m{bar}\x1b[0m\r\n")
+
+    @staticmethod
+    async def _sleep_unless_cancelled(job: Job, seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while job.status != "cancelled" and (left := deadline - time.monotonic()) > 0:
+            await asyncio.sleep(min(1.0, left))
+
+    async def _wait_for_cooldown(self, job: Job) -> None:
+        """Hold a download while the job is backing off from a YouTube rate limit."""
+        left = job.pause_until - time.time()
+        if left > 0:
+            await self._sleep_unless_cancelled(job, left)
+
+    async def _rate_limited(self, job: Job) -> None:
+        """YouTube said "slow down": pause every download in this job, longer each time."""
+        job.rate_hits += 1
+        pause = min(30 * job.rate_hits, 180)
+        until = time.time() + pause
+        if until > job.pause_until + 1:
+            job.pause_until = until
+            await self._emit(job, f"\x1b[33m\u23f8 YouTube is rate-limiting this connection - pausing "
+                                  f"downloads for {pause}s, then carrying on\x1b[0m\r\n")
 
     async def _emit_review_report(self, job: Job, output_dir: Path, playlist_name: str, outcomes: list[TrackOutcome]) -> Path | None:
         if not outcomes:
@@ -1125,6 +1183,9 @@ class JobManager:
             for attempt in range(1, _DL_ATTEMPTS + 1):
                 if job.status == "cancelled":
                     return False, "cancelled"
+                await self._wait_for_cooldown(job)
+                if job.status == "cancelled":
+                    return False, "cancelled"
                 suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
                 await status(f"\x1b[2m\u2192 trying {source} ({what}){suffix}...\x1b[0m")
                 errors: list[str] = []
@@ -1133,8 +1194,11 @@ class JobManager:
                     emit=detailed, progress_cb=None if detailed else progress, errors=errors)
                 self._cleanup_sidecars(out_dir, basename, ext)
                 if code == 0 and target.exists():
+                    job.rate_hits = max(0, job.rate_hits - 1)
                     return True, ""
                 why = _short_error(errors) or f"exit code {code}"
+                if _RATE_LIMIT_RE.search("\n".join(errors)):
+                    await self._rate_limited(job)
                 if attempt < _DL_ATTEMPTS and job.status != "cancelled":
                     await status(f"\x1b[2m{source} hiccup ({why}) - retrying...\x1b[0m")
                     await asyncio.sleep(_DL_BACKOFF * attempt)
@@ -1171,19 +1235,48 @@ class JobManager:
                 return await finish(TrackOutcome(track, "no_candidate", hint, []))
 
             await status("\x1b[2m\U0001f50e searching sources...\x1b[0m")
-            candidates = await asyncio.to_thread(
-                candidate_search.search_all, track.artist, track.title, service)
-            # Belt and braces for the source choice: never download from a service the user
-            # (or the access gate) excluded, whatever the search layer returned.
             allowed = candidate_search.SERVICE_SOURCES[service]
-            candidates = [c for c in candidates if c.source in allowed]
-            choice = choose(
-                track.artist, track.title, track.duration, candidates,
-                prefer_ytmusic=settings.get("prefer_ytmusic", True),
-                use_duration=settings.get("spotify_match_duration", True),
-            )
+            # Strict matching (the default): only a verified match is ever downloaded. On 120
+            # real songs every remaining wrong pick was an unverified "plausible" one, so those
+            # now go to the review report — with their links — instead of into the library.
+            strict = settings.get("strict_matching", True)
+
+            async def search(deep: bool):
+                found = await asyncio.to_thread(
+                    candidate_search.search_all, track.artist, track.title, service, deep=deep)
+                failed = set(getattr(found, "failed", ()) or ())
+                # Belt and braces for the source choice: never download from a service the
+                # user (or the access gate) excluded, whatever the search layer returned.
+                return [c for c in found if c.source in allowed], failed
+
+            def pick(found):
+                picked = choose(
+                    track.artist, track.title, track.duration, found,
+                    prefer_ytmusic=settings.get("prefer_ytmusic", True),
+                    use_duration=settings.get("spotify_match_duration", True),
+                )
+                return picked, ([d for d in picked.eligible if d.accepted] if strict else picked.eligible)
+
+            candidates, failed = await search(False)
+            choice, pool = pick(candidates)
+            if not pool and job.status != "cancelled":
+                # Nothing safe to download yet. Before giving up, search again in other words
+                # (plain song name, more results, audio uploads first) — this is what gets the
+                # songs whose first page of results was all videos, covers and live cuts.
+                await status("\x1b[2m\U0001f50e no verified match yet - searching again...\x1b[0m")
+                more, failed_again = await search(True)
+                seen = {c.url for c in candidates}
+                candidates += [c for c in more if c.url not in seen]
+                failed &= failed_again          # a source that answered the second time is fine
+                choice, pool = pick(candidates)
             decisions = choice.decisions
+            unanswered = ", ".join(_SOURCE_NAMES.get(s, s) for s in sorted(failed))
             if not decisions:
+                if unanswered:
+                    msg = f"{unanswered} didn't answer - will retry at the end"
+                    await status(f"\x1b[33m\u26a0 {msg}\x1b[0m", store=True)
+                    return await finish(TrackOutcome(track, "no_candidate", f"search failed: {msg}", [],
+                                                     retryable=True))
                 await status("\x1b[33m\u26a0 no source found; added to review report\x1b[0m", store=True)
                 return await finish(TrackOutcome(track, "no_candidate", "no external candidates found", []))
 
@@ -1192,11 +1285,6 @@ class JobManager:
             # under load the right version can fail and succeed a minute later, and taking
             # "the next plausible candidate" instead quietly saved a different edit that no
             # retry ever corrected. Failing here hands the track to the retry sweep instead.
-            # Strict matching (the default): only a verified match is ever downloaded. On 120
-            # real songs every remaining wrong pick was an unverified "plausible" one, so those
-            # now go to the review report — with their links — instead of into the library.
-            strict = settings.get("strict_matching", True)
-            pool = [d for d in choice.eligible if d.accepted] if strict else choice.eligible
             reference = pool[0] if pool else None
             stand_ins = [d for d in pool if d is reference or same_recording(d, reference)][:5]
             selected = None
@@ -1231,10 +1319,16 @@ class JobManager:
                 else:
                     msg = "no confident match found (skipped to avoid a wrong version)"
                     reason = "no confident match available"
+                if unanswered and not attempts:
+                    # Part of the search didn't answer, so the right match may simply not
+                    # have been seen yet: worth another go at the end.
+                    msg += f" ({unanswered} didn't answer - will retry)"
+                    reason += f"; {unanswered} didn't answer"
                 await status(f"\x1b[31m\u2717 {msg}; added to review\x1b[0m", store=True)
                 return await finish(TrackOutcome(
                     track, "download_failed", reason,
                     decisions[:5], failed_attempts=tuple(attempts),
+                    retryable=bool(unanswered) and not attempts,
                 ))
 
             await asyncio.to_thread(self._tag, target, track)

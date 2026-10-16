@@ -61,15 +61,39 @@ def search_ytmusic(artist: str, title: str) -> list[Candidate]:
     return candidates_from_ytmusic(ytmusic_match.search_songs(artist, title))
 
 
+def _ytdlp_or_raise(query: str, prefix: str, source: str, count: int = 5) -> list[Candidate]:
+    import yt_dlp
+    options = {"quiet": True, "no_warnings": True, "skip_download": True, "extract_flat": True,
+               "noplaylist": True}
+    with yt_dlp.YoutubeDL(options) as downloader:
+        info = downloader.extract_info(f"{prefix}{count}:{query}", download=False) or {}
+    return candidates_from_ytdlp(info.get("entries") or [], source)
+
+
 def search_ytdlp(query: str, prefix: str, source: str) -> list[Candidate]:
     try:
-        import yt_dlp
-        options = {"quiet": True, "skip_download": True, "extract_flat": True, "noplaylist": True}
-        with yt_dlp.YoutubeDL(options) as downloader:
-            info = downloader.extract_info(f"{prefix}5:{query}", download=False) or {}
+        return _ytdlp_or_raise(query, prefix, source)
     except Exception:
         return []
-    return candidates_from_ytdlp(info.get("entries") or [], source)
+
+
+class SearchResults(list):
+    """Candidates found, plus the sources that failed to answer.
+
+    A source that errored (a rate limit, a dropped connection) isn't the same as one that
+    found nothing: the first is worth asking again later. Both used to come back as an empty
+    list, so a brief hiccup during a 200-song playlist marked songs "not found" for good.
+    """
+
+    def __init__(self, items=(), failed=()):
+        super().__init__(items)
+        self.failed = tuple(failed)
+
+
+def _plain_title(title: str) -> str:
+    """The song name without credits, version labels or brackets, for a second search."""
+    from .matching import _strip_decorations
+    return " ".join(_strip_decorations(title).split()) or title
 
 
 # Which searches each user-facing service runs. "auto" casts the widest net and lets the
@@ -84,18 +108,37 @@ SERVICE_SOURCES: dict[str, tuple[str, ...]] = {
 }
 
 
-def search_all(artist: str, title: str, service: str = "auto") -> list[Candidate]:
-    """Search every source the chosen service covers, newest-first by relevance."""
+def search_all(artist: str, title: str, service: str = "auto", deep: bool = False) -> SearchResults:
+    """Search every source the chosen service covers, newest-first by relevance.
+
+    deep=True is the second attempt for a song the first search couldn't verify: the plain
+    song name (no "feat."/"Remastered"/brackets), twice as many results, and wording that
+    favours audio uploads over videos. Only songs that need it pay for the extra searches.
+    """
     wanted = SERVICE_SOURCES.get(service) or SERVICE_SOURCES["auto"]
-    query = f"{artist} - {title}".strip(" -")
     found: list[Candidate] = []
-    if "youtube_music" in wanted:
-        found += search_ytmusic(artist, title)
-    if "youtube" in wanted:
-        found += search_ytdlp(query, "ytsearch", "youtube")
-    if "soundcloud" in wanted:
-        found += search_ytdlp(query, "scsearch", "soundcloud")
-    return found
+    failed: list[str] = []
+
+    def run(source: str, search) -> None:
+        if source not in wanted:
+            return
+        try:
+            found.extend(search())
+        except Exception:  # noqa: BLE001
+            failed.append(source)
+
+    if not deep:
+        query = f"{artist} - {title}".strip(" -")
+        run("youtube_music", lambda: candidates_from_ytmusic(ytmusic_match.search_songs_or_raise(artist, title)))
+        run("youtube", lambda: _ytdlp_or_raise(query, "ytsearch", "youtube"))
+        run("soundcloud", lambda: _ytdlp_or_raise(query, "scsearch", "soundcloud"))
+    else:
+        plain = _plain_title(title)
+        run("youtube_music", lambda: candidates_from_ytmusic(
+            ytmusic_match.search_songs_or_raise(artist, plain, limit=10)))
+        run("youtube", lambda: _ytdlp_or_raise(f"{artist} {plain} audio".strip(), "ytsearch", "youtube", 10))
+        run("soundcloud", lambda: _ytdlp_or_raise(f"{plain} {artist}".strip(), "scsearch", "soundcloud", 10))
+    return SearchResults(found, failed)
 
 
 _GROUP_RE = re.compile(r"\s*[(\[][^)\]]*[)\]]")

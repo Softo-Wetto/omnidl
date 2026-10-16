@@ -237,6 +237,17 @@ test("all-success, all-skipped, failed with cookies, and saved-but-unverified", 
   assert.match(review.outcome, /1 to check/);
 });
 
+test("a playlist Spotify only partly listed is 'with issues' and says why", () => {
+  const card = core.describeJob({ status: "done", incomplete_list: true,
+    note: "Spotify returned only the first 200 tracks - re-run later for the rest",
+    counts: { downloaded: 200, review: 0, skipped: 0, failed: 0, total: 200 } }, ctx);
+  assert.equal(card.status, "Completed with issues");
+  assert.match(card.note, /first 200/);
+  assert.equal(card.noteIsError, false);
+  const live = core.describeJob({ status: "running", counts: { downloaded: 57, review: 0, skipped: 3, failed: 2, total: 250 } }, ctx);
+  assert.equal(live.outcome, "57 saved · 3 already had · 2 not found — 250 tracks");
+});
+
 test("hosted cards count down to the server's real expiry", () => {
   const hosted = { local: false, remote: false, now: NOW };
   const fresh = core.describeJob({ status: "done", has_files: true, file_count: 1, expires: NOW / 1000 + 42 * 60 }, hosted);

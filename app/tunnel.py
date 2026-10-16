@@ -53,6 +53,33 @@ def _warn_if_stale(exe: str) -> None:
               f"releases, so download the latest over {exe} before it stops connecting.")
 
 
+def clock_offset(timeout: float = 10.0) -> float | None:
+    """Seconds this PC's clock is ahead of Cloudflare's (negative = behind), or None if unknown."""
+    import urllib.request
+    try:
+        sent = time.time()
+        body = urllib.request.urlopen("https://www.cloudflare.com/cdn-cgi/trace", timeout=timeout).read()
+        received = time.time()
+        for line in body.decode("ascii", "replace").splitlines():
+            if line.startswith("ts="):
+                return (sent + received) / 2 - float(line[3:])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def _warn_if_clock_off() -> None:
+    """Remote logins carry a validity window, so a drifting clock eventually breaks them."""
+    offset = clock_offset()
+    if offset is None or abs(offset) < 60:
+        return
+    minutes = abs(offset) / 60
+    print(f"[OmniDL] Remote access: this PC's clock is {minutes:.0f} min "
+          f"{'fast' if offset > 0 else 'slow'}. Remote logins tolerate up to 10 min; to fix it for "
+          f"good, turn on Windows Time (Settings > Time & language > Date & time > Sync now; "
+          f"it needs the 'Windows Time' service enabled).")
+
+
 def find_cloudflared(configured: str = "") -> str | None:
     """The cloudflared binary to run: remote.json's path, then PATH, then the per-user install."""
     candidates = [configured, shutil.which("cloudflared") or ""]
@@ -151,6 +178,7 @@ class Tunnel:
 
     def _supervise(self) -> None:
         _warn_if_stale(self.exe)            # here, not at startup: it shouldn't delay the server
+        _warn_if_clock_off()
         delay = 5
         while not self._stopping.is_set():
             started = time.monotonic()

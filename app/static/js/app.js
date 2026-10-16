@@ -423,7 +423,7 @@ function renderJob(job) {
   if (facts.length) li.append(el("div", "job-facts", facts.join(" · ")));
   if (card.destination) li.append(el("div", "job-dest", card.destination));
   if (card.note) {
-    const note = el("div", "job-note", card.note);
+    const note = el("div", card.noteIsError ? "job-note" : "job-note info", card.note);
     note.title = card.note;
     li.append(note);
   }
@@ -505,7 +505,7 @@ function renderNowCard() {
   }
   const facts = [card.outcome, card.destination].filter(Boolean).join(" · ");
   if (facts) parts.push(el("div", "now-facts", facts));
-  if (card.note) parts.push(el("div", "job-note", card.note));
+  if (card.note) parts.push(el("div", card.noteIsError ? "job-note" : "job-note info", card.note));
   const actions = el("div", "job-actions now-actions");
   actions.append(...jobActions(job, card).filter((b) => !b.classList.contains("btn-remove")));
   const logBtn = makeButton("Show log", "Show this job's live output", () => {
@@ -758,7 +758,11 @@ function handleMessage(msg) {
       break;
     case "progress": {
       const j = state.jobs.get(msg.job_id);
-      if (j) { j.progress = msg.progress; j.label = msg.label; updateJobProgress(msg.job_id); }
+      if (!j) break;
+      j.progress = msg.progress;
+      j.label = msg.label;
+      // A finished track updates the card's live tally ("57 saved · 2 not found").
+      if (msg.counts) { j.counts = msg.counts; renderQueue(); } else updateJobProgress(msg.job_id);
       break;
     }
     case "removed":

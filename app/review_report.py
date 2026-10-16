@@ -31,6 +31,9 @@ class TrackOutcome:
     selected: MatchDecision | None = None
     saved_as: str | None = None
     failed_attempts: tuple[MatchDecision, ...] = ()
+    # Failed for a reason that may pass (a search that didn't answer), so the end-of-list
+    # sweep tries it again.
+    retryable: bool = False
 
 
 _SERVICE_NAMES = [

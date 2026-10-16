@@ -130,6 +130,16 @@ class TokenTests(unittest.TestCase):
     def test_an_expired_token_is_refused(self):
         self.assertRefused(token({"exp": time.time() - 3600}), why="expired")
 
+    def test_a_fresh_login_works_when_the_pc_clock_is_minutes_off(self):
+        """Windows Time was disabled on the home PC and its clock drifted 3 minutes. A slow clock
+        put a fresh token's nbf in the future; a fast one expired tokens early."""
+        now = time.time()
+        for drift in (-240, 240):                    # PC 4 minutes behind / ahead of Cloudflare
+            with patch("app.remote_access.time.time", return_value=now + drift):
+                run(verifier().verify(token({"nbf": now, "iat": now, "exp": now + 3600})))
+        with patch("app.remote_access.time.time", return_value=now + 3600 + 900):
+            self.assertRefused(token({"nbf": now, "iat": now, "exp": now + 3600}), why="expired")
+
     def test_a_token_without_an_expiry_is_refused(self):
         self.assertRefused(token({"exp": None}))
 
@@ -353,6 +363,32 @@ class ConfigIsolationTests(unittest.TestCase):
         for key in ("tunnel_config", "access_team", "access_aud", "hostname", "cloudflared"):
             self.assertNotIn(key, settings_mod.DEFAULTS)
             self.assertNotIn(key, settings_mod.SESSION_PREF_KEYS)
+
+
+class ClockTests(unittest.TestCase):
+    def test_the_clock_offset_comes_from_cloudflare(self):
+        from app import tunnel
+        body = MagicMockBody(b"fl=1\nts=1000.000\nip=x\n")
+        with patch("urllib.request.urlopen", return_value=body), \
+             patch("app.tunnel.time.time", return_value=1180.0):
+            self.assertAlmostEqual(180.0, tunnel.clock_offset())
+
+    def test_a_drifting_clock_is_reported_at_startup(self):
+        from app import tunnel
+        with patch("app.tunnel.clock_offset", return_value=183.0), patch("builtins.print") as said:
+            tunnel._warn_if_clock_off()
+        self.assertIn("3 min fast", said.call_args.args[0])
+        with patch("app.tunnel.clock_offset", return_value=4.0), patch("builtins.print") as said:
+            tunnel._warn_if_clock_off()
+        said.assert_not_called()
+
+
+class MagicMockBody:
+    def __init__(self, data):
+        self.data = data
+
+    def read(self):
+        return self.data
 
 
 if __name__ == "__main__":

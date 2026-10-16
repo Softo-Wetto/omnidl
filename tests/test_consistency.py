@@ -118,7 +118,7 @@ class PhraseTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(manager, "_stream_subprocess", side_effect=download):
                 result = await manager._fetch_track(job, Track("", "drake one dance"), job.settings, True, 1, 1)
 
-        search.assert_called_once_with("Drake", "One Dance", "auto")
+        search.assert_called_once_with("Drake", "One Dance", "auto", deep=False)
         self.assertEqual(("Drake", "One Dance"), (result.track.artist, result.track.title))
         self.assertEqual("Drake - One Dance.opus", result.saved_as)
 

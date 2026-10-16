@@ -70,6 +70,50 @@ class LauncherOwnershipTests(unittest.TestCase):
         stop.assert_not_called()
 
 
+class ShutdownTests(unittest.IsolatedAsyncioTestCase):
+    """An open dashboard tab used to hang shutdown forever, so a relaunch couldn't restart."""
+
+    async def test_shutdown_closes_open_tabs_as_service_restart_and_arms_a_backstop(self):
+        tab = AsyncMock()
+        manager = MagicMock()
+        manager.jobs = {}
+        manager.subscribers = {tab: "s1"}
+        local = types.SimpleNamespace(state=types.SimpleNamespace(sid="s1"), cookies={}, headers={},
+                                      client=types.SimpleNamespace(host="127.0.0.1"))
+        with patch("app.main.manager", manager), patch("app.main.settings_mod.LOCAL_MODE", True),              patch("app.main.signal.raise_signal") as raised,              patch("app.main.threading.Timer") as timer:
+            reply = await main.instance_shutdown(local)
+            await asyncio.sleep(0.6)
+        self.assertEqual({"ok": True}, reply)
+        tab.close.assert_awaited_once_with(code=1012)
+        self.assertEqual({}, manager.subscribers)
+        self.assertTrue(raised.called)
+        timer.return_value.start.assert_called_once()
+        self.assertTrue(timer.return_value.daemon)       # never keeps the process alive
+
+    async def test_uvicorn_asks_connections_to_close_before_waiting_for_them(self):
+        import uvicorn.server as server_module
+        from app import compat
+        compat.fix_uvicorn_shutdown()
+        order = []
+
+        class Listener:
+            def close(self):
+                order.append("stop listening")
+
+            async def wait_closed(self):
+                order.append("wait for connections")
+
+        connection = MagicMock()
+        connection.shutdown.side_effect = lambda: order.append("ask to close")
+        server = types.SimpleNamespace(servers=[Listener()], force_exit=True,
+                                       server_state=types.SimpleNamespace(connections={connection}, tasks=set()),
+                                       config=types.SimpleNamespace(timeout_graceful_shutdown=None))
+        server._wait_tasks_to_complete = AsyncMock()
+        with patch("app.main.asyncio.sleep", AsyncMock()):
+            await server_module.Server.shutdown(server)
+        self.assertLess(order.index("ask to close"), order.index("wait for connections"))
+
+
 # ---- D02: library repair reads names one explicit way and never guesses -----------------------
 
 def _wav(path: Path) -> None:
@@ -239,7 +283,7 @@ class SoundCloudOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.results = [yt, sc]                          # even if the search layer leaked one
         result, argvs, _resolve, search = await self.fetch(Track("Nova", "Midnight Run", 180),
                                                            bulk_service="soundcloud")
-        search.assert_called_once_with("Nova", "Midnight Run", "soundcloud")
+        search.assert_called_once_with("Nova", "Midnight Run", "soundcloud", deep=False)
         self.assertEqual("downloaded", result.status)
         self.assertEqual(sc.url, argvs[0][-1])
         self.assertNotIn("--cookies", argvs[0])
@@ -249,7 +293,9 @@ class SoundCloudOnlyTests(unittest.IsolatedAsyncioTestCase):
         _result, _argvs, resolve, search = await self.fetch(Track("Nova", "Midnight Run", 180),
                                                             bulk_service="auto", _youtube_ok=False)
         resolve.assert_not_called()
-        search.assert_called_once_with("Nova", "Midnight Run", "soundcloud")
+        self.assertTrue(search.call_args_list)          # first search, then the second wording
+        for call in search.call_args_list:
+            self.assertEqual(("Nova", "Midnight Run", "soundcloud"), call.args)
 
     def test_youtube_cookies_and_tokens_only_go_to_youtube(self):
         s = track_settings(self.tmp.name)
@@ -517,58 +563,121 @@ class OutputFolderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("doesn't exist", json.loads(response.body)["error"])
 
 
-# ---- D12: building a Save zip doesn't freeze the app -----------------------------------------
+# ---- D12: Save zips stream without freezing the app ----------------------------------------
+
+async def collect(response) -> bytes:
+    return b"".join([chunk async for chunk in response.body_iterator])
+
+
+def hosted_job(out: Path) -> Job:
+    job = Job("x", "youtube", None, "", list_name="Road trip")
+    job.out_dir = out
+    job.status = "done"
+    return job
+
 
 class ZipTests(unittest.IsolatedAsyncioTestCase):
-    async def test_the_event_loop_keeps_running_while_a_zip_is_built(self):
+    def files(self, root: Path) -> list[Path]:
+        (root / "a").mkdir()
+        (root / "b").mkdir()
+        made = [root / "a" / "Sơn Tùng M-TP - Lạc Trôi.opus", root / "a" / "Same.opus", root / "b" / "Same.opus"]
+        for n, path in enumerate(made):
+            path.write_bytes(bytes([n]) * (100_000 + n))
+        return made
+
+    async def test_the_streamed_zip_is_valid_and_its_length_is_known_up_front(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            files = self.files(Path(tmp))
+            job = Job("x", "youtube", None, "")
+            job.status = "done"
+            job.produced = [str(f) for f in files]
+            with patch("app.main._owned", return_value=job):
+                response = await main.job_file(request(), job.id)
+            data = await collect(response)
+        self.assertEqual(str(len(data)), response.headers["content-length"])
+        self.assertIn("attachment", response.headers["content-disposition"])
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        self.assertIsNone(archive.testzip())                # every CRC checks out
+        self.assertEqual(["Sơn Tùng M-TP - Lạc Trôi.opus", "Same.opus", "b - Same.opus"], archive.namelist())
+        self.assertEqual(100_002, len(archive.read("b - Same.opus")))
+        # No trailing data descriptors: sizes are in the local headers (best for Macs/streaming).
+        self.assertFalse(any(info.flag_bits & 0x08 for info in archive.infolist()))
+
+    async def test_zip64_records_are_written_when_an_archive_needs_them(self):
+        import zipfile
+        from app import zipstream
+        with tempfile.TemporaryDirectory() as tmp:
+            files = self.files(Path(tmp))
+            with patch.object(zipstream, "ZIP64_LIMIT", 150_000):   # pretend 150 kB is 4 GB
+                plan = zipstream.ZipPlan(files)
+                data = b"".join(plan.chunks())
+        self.assertTrue(plan.zip64_end)
+        self.assertEqual(plan.length, len(data))
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        self.assertIsNone(archive.testzip())
+        self.assertEqual(3, len(archive.namelist()))
+
+    async def test_the_app_stays_responsive_while_a_zip_is_sent(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
-            (out / "a.opus").write_bytes(b"a")
-            (out / "b.opus").write_bytes(b"b")
-            job = Job("x", "youtube", None, "")
-            job.out_dir = out
-            job.status = "done"
-            real = main._write_zip
-            made = []
+            for name in ("a.opus", "b.opus"):
+                (out / name).write_bytes(b"x" * 1000)
+            job = hosted_job(out)
+            from app import zipstream
+            real_open = open
 
-            def slow(path, files):
-                made.append(path)
-                time.sleep(0.5)
-                real(path, files)
+            def slow_open(path, mode="r", *args, **kwargs):
+                if "b" in mode and str(path).endswith(".opus"):
+                    time.sleep(0.3)                          # a slow disk
+                return real_open(path, mode, *args, **kwargs)
 
             ticks = 0
+            done = asyncio.Event()
 
             async def ticker():
                 nonlocal ticks
-                while not made or made[0].stat().st_size == 0:
+                while not done.is_set():
                     ticks += 1
                     await asyncio.sleep(0.02)
 
-            with patch("app.main._owned", return_value=job), patch("app.main._write_zip", side_effect=slow):
-                response, _ = await asyncio.gather(main.job_file(request(), job.id), ticker())
-            self.assertGreater(ticks, 10)
-            self.assertTrue(made[0].is_file())
-            await response.background()
-            self.assertFalse(made[0].exists())               # cleaned up once sent
+            async def download():
+                with patch("app.main._owned", return_value=job):
+                    response = await main.job_file(request(), job.id)
+                with patch.object(zipstream, "open", slow_open, create=True):
+                    data = await collect(response)
+                done.set()
+                return data
 
-    async def test_a_failed_zip_is_cleaned_up_and_reported(self):
+            data, _ = await asyncio.gather(download(), ticker())
+        self.assertGreater(len(data), 2000)
+        self.assertGreater(ticks, 15)
+
+    async def test_a_cancelled_download_frees_its_slot(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp)
-            (out / "a.opus").write_bytes(b"a")
-            (out / "b.opus").write_bytes(b"b")
-            job = Job("x", "youtube", None, "")
-            job.out_dir = out
-            job.status = "done"
-            made = []
+            for name in ("a.opus", "b.opus"):
+                (out / name).write_bytes(b"x" * 3_000_000)
+            job = hosted_job(out)
+            with patch("app.main._owned", return_value=job):
+                response = await main.job_file(request(), job.id)
+            stream = response.body_iterator
+            await stream.__anext__()                          # the browser starts, then goes away
+            self.assertEqual(1, main._ZIP_SLOTS._value)
+            await stream.aclose()
+        self.assertEqual(2, main._ZIP_SLOTS._value)
 
-            def broken(path, files):
-                made.append(path)
-                raise OSError("disk full")
-
-            with patch("app.main._owned", return_value=job), patch("app.main._write_zip", side_effect=broken):
+    async def test_a_file_that_vanished_is_reported_before_anything_is_sent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for name in ("a.opus", "b.opus"):
+                (out / name).write_bytes(b"x")
+            job = hosted_job(out)
+            files = job.list_files()
+            files[1].unlink()
+            with patch("app.main._owned", return_value=job),                  patch.object(Job, "list_files", return_value=files):
                 response = await main.job_file(request(), job.id)
         self.assertEqual(500, response.status_code)
-        self.assertFalse(made[0].exists())
 
 
 if __name__ == "__main__":

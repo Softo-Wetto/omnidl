@@ -318,7 +318,9 @@
   // Everything a job card says, in plain words. ctx = { local, remote, now (ms) }.
   function describeJob(job, ctx) {
     const counts = job.counts || null;
-    const issues = !!counts && (counts.failed > 0 || counts.review > 0);
+    // A playlist Spotify only partly handed over is unfinished business even if every track
+    // it did list was saved.
+    const issues = (!!counts && (counts.failed > 0 || counts.review > 0)) || !!job.incomplete_list;
     let status, tone;
     if (job.status === "queued") { status = "Queued"; tone = "queued"; }
     else if (job.status === "running") { status = "Downloading"; tone = "running"; }
@@ -361,7 +363,9 @@
     const note = job.note ? job.note.charAt(0).toUpperCase() + job.note.slice(1) : "";
     return {
       status, tone, title, outcome, formats, destination, fileCount,
-      note: job.status === "error" ? note : "",
+      // Why it failed — or, for a finished job, anything it couldn't do (e.g. a partial playlist).
+      note: job.status === "running" || job.status === "queued" ? "" : note,
+      noteIsError: job.status === "error",
       cookieTrouble: job.status === "error" && COOKIE_RE.test(job.note || ""),
       when: fmtWhen(job.finished || job.started || job.created, ctx.now),
       canSave: finished && !!job.has_files,

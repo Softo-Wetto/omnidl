@@ -219,7 +219,52 @@ def _playlist_query_hash(timeout: int = 20) -> str:
     return hash_value
 
 
+def _retry_delay(exc: Exception, attempt: int) -> float:
+    """How long to wait before retrying a Spotify request: its Retry-After when it gives one
+    (capped), otherwise exponential backoff."""
+    raw = exc.headers.get("Retry-After") if isinstance(exc, HTTPError) and exc.headers else None
+    if raw is not None:
+        try:
+            return min(float(raw), 30.0)
+        except (TypeError, ValueError):
+            pass
+    return 1.5 * (2 ** attempt)
+
+
+def _transient(exc: Exception) -> bool:
+    """Worth retrying: rate limits, server errors, dropped connections and timeouts."""
+    if isinstance(exc, HTTPError):
+        return exc.code == 429 or exc.code >= 500
+    return isinstance(exc, (OSError, TimeoutError))
+
+
+_PAGE_ATTEMPTS = 4
+
+
 def _partner_page(pid: str, token: str, offset: int, limit: int, timeout: int):
+    """One page of a playlist, retried through brief rate limits and network blips.
+
+    A single failed page used to abandon the whole full fetch, and a 300-song playlist came
+    back as the embed's first 100. If Spotify has rotated the persisted-query hash, it's
+    re-scraped once and the page asked for again.
+    """
+    for attempt in range(_PAGE_ATTEMPTS):
+        try:
+            payload = _partner_page_once(pid, token, offset, limit, timeout)
+        except Exception as exc:  # noqa: BLE001
+            if attempt == _PAGE_ATTEMPTS - 1 or not _transient(exc):
+                raise
+            time.sleep(_retry_delay(exc, attempt))
+            continue
+        errors = str(payload.get("errors") or "")
+        if errors and "PersistedQueryNotFound" in errors and attempt < _PAGE_ATTEMPTS - 1:
+            _HASH_CACHE.pop("h", None)              # stale hash: fetch the current one
+            continue
+        return payload
+    raise RuntimeError("unreachable")
+
+
+def _partner_page_once(pid: str, token: str, offset: int, limit: int, timeout: int):
     variables = json.dumps({
         "uri": f"spotify:playlist:{pid}", "offset": offset, "limit": limit,
         # required Boolean! — omitting it is a hard validation error
@@ -250,15 +295,28 @@ def _track_from_partner(item: dict, ) -> "Track | None":
     )
 
 
+class PartialPlaylist(Exception):
+    """Paging failed part-way; `tracks` holds everything fetched before it did."""
+
+    def __init__(self, tracks: list["Track"], total: int, cause: Exception):
+        super().__init__(str(cause))
+        self.tracks, self.total = tracks, total
+
+
 def _partner_playlist(pid: str, token: str, timeout: int) -> tuple[list["Track"], int]:
     """Every track in the playlist, plus Spotify's own total (which may exceed what's
     playable — unavailable/local items are counted but have no track data)."""
     tracks: list[Track] = []
     offset, total = 0, 0
     while True:
-        payload = _partner_page(pid, token, offset, 100, timeout)
-        if payload.get("errors"):
-            raise ValueError(str(payload["errors"])[:200])
+        try:
+            payload = _partner_page(pid, token, offset, 100, timeout)
+            if payload.get("errors"):
+                raise ValueError(str(payload["errors"])[:200])
+        except Exception as exc:  # noqa: BLE001
+            if tracks:
+                raise PartialPlaylist(tracks, total, exc) from exc
+            raise
         content = _dig(payload, ["data", "playlistV2", "content"]) or {}
         items = content.get("items") or []
         total = content.get("totalCount") or total
@@ -387,6 +445,11 @@ def resolve(text: str, timeout: int = 20) -> Resolved:
                         # data, so only flag truncation if we clearly fell short.
                         return Resolved(kind, name, full,
                                         truncated=len(full) < spotify_total - 5)
+                except PartialPlaylist as partial:
+                    # Pages kept failing after retries. Whatever was fetched is still more
+                    # than the embed's 100, so download that and say the list is incomplete.
+                    if len(partial.tracks) > len(embed_tracks):
+                        return Resolved(kind, name, partial.tracks, truncated=True)
                 except Exception:
                     pass                    # fall through to the legacy API, then the embed
                 full = _api_playlist(sid, token, timeout)
