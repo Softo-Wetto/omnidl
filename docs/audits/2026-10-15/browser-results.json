@@ -1,0 +1,283 @@
+{
+  "layouts": [
+    {
+      "viewport": 1440,
+      "documentWidth": 1440,
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 799.90625,
+        "height": 46,
+        "right": 836.90625,
+        "bottom": 152
+      },
+      "download": {
+        "x": 1297.078125,
+        "y": 106,
+        "width": 105.921875,
+        "height": 46,
+        "right": 1403,
+        "bottom": 152
+      },
+      "queue": {
+        "x": 1080,
+        "y": 229,
+        "width": 340,
+        "height": 651,
+        "right": 1420,
+        "bottom": 880
+      },
+      "terminal": {
+        "x": 20,
+        "y": 229,
+        "width": 1044,
+        "height": 651,
+        "right": 1064,
+        "bottom": 880
+      },
+      "horizontalOverflow": []
+    },
+    {
+      "viewport": 1024,
+      "documentWidth": 1024,
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 383.90625,
+        "height": 46,
+        "right": 420.90625,
+        "bottom": 152
+      },
+      "download": {
+        "x": 881.078125,
+        "y": 106,
+        "width": 105.921875,
+        "height": 46,
+        "right": 987,
+        "bottom": 152
+      },
+      "queue": {
+        "x": 664,
+        "y": 229,
+        "width": 340,
+        "height": 519,
+        "right": 1004,
+        "bottom": 748
+      },
+      "terminal": {
+        "x": 20,
+        "y": 229,
+        "width": 628,
+        "height": 519,
+        "right": 648,
+        "bottom": 748
+      },
+      "horizontalOverflow": []
+    },
+    {
+      "viewport": 820,
+      "documentWidth": 820,
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 179.90625,
+        "height": 46,
+        "right": 216.90625,
+        "bottom": 152
+      },
+      "download": {
+        "x": 677.078125,
+        "y": 106,
+        "width": 105.921875,
+        "height": 46,
+        "right": 783,
+        "bottom": 152
+      },
+      "queue": {
+        "x": 20,
+        "y": 688,
+        "width": 780,
+        "height": 472,
+        "right": 800,
+        "bottom": 1160
+      },
+      "terminal": {
+        "x": 20,
+        "y": 229,
+        "width": 780,
+        "height": 443,
+        "right": 800,
+        "bottom": 672
+      },
+      "horizontalOverflow": []
+    },
+    {
+      "viewport": 768,
+      "documentWidth": 768,
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 127.90625,
+        "height": 46,
+        "right": 164.90625,
+        "bottom": 152
+      },
+      "download": {
+        "x": 625.078125,
+        "y": 106,
+        "width": 105.921875,
+        "height": 46,
+        "right": 731,
+        "bottom": 152
+      },
+      "queue": {
+        "x": 20,
+        "y": 594.40625,
+        "width": 728,
+        "height": 409.59375,
+        "right": 748,
+        "bottom": 1004
+      },
+      "terminal": {
+        "x": 20,
+        "y": 229,
+        "width": 728,
+        "height": 349.40625,
+        "right": 748,
+        "bottom": 578.40625
+      },
+      "horizontalOverflow": []
+    },
+    {
+      "viewport": 390,
+      "documentWidth": 380,
+      "input": {
+        "x": 25,
+        "y": 140,
+        "width": 330,
+        "height": 47,
+        "right": 355,
+        "bottom": 187
+      },
+      "download": {
+        "x": 132.28125,
+        "y": 244,
+        "width": 222.71875,
+        "height": 37,
+        "right": 355,
+        "bottom": 281
+      },
+      "queue": {
+        "x": 12,
+        "y": 828.1875,
+        "width": 356,
+        "height": 522,
+        "right": 368,
+        "bottom": 1350.1875
+      },
+      "terminal": {
+        "x": 12,
+        "y": 352,
+        "width": 356,
+        "height": 464.1875,
+        "right": 368,
+        "bottom": 816.1875
+      },
+      "horizontalOverflow": []
+    },
+    {
+      "viewport": 320,
+      "documentWidth": 310,
+      "input": {
+        "x": 25,
+        "y": 140,
+        "width": 260,
+        "height": 47,
+        "right": 285,
+        "bottom": 187
+      },
+      "download": {
+        "x": 90.28125,
+        "y": 244,
+        "width": 194.71875,
+        "height": 54,
+        "right": 285,
+        "bottom": 298
+      },
+      "queue": {
+        "x": 12,
+        "y": 788,
+        "width": 286,
+        "height": 607,
+        "right": 298,
+        "bottom": 1395
+      },
+      "terminal": {
+        "x": 12,
+        "y": 369,
+        "width": 286,
+        "height": 407,
+        "right": 298,
+        "bottom": 776
+      },
+      "horizontalOverflow": []
+    }
+  ],
+  "reproductions": {
+    "failedSettings": {
+      "status": "Saved ✓",
+      "lostAudioFormat": true,
+      "toasts": [
+        "Can't reach your home PC — it may be off or asleep, or your Cloudflare login expired. Reload to sign in again.",
+        "Settings saved"
+      ]
+    },
+    "http500": {
+      "input": ""
+    },
+    "doubleSubmit": {
+      "requests": 2
+    },
+    "logRace": {
+      "selected": "audit-failed",
+      "log": "B_SELECTED_LOGA_STALE_LOG"
+    },
+    "staleBulk": {
+      "submittedEntries": [
+        {
+          "kind": "search",
+          "url": "",
+          "artist": "Old artist",
+          "title": "Old song"
+        }
+      ]
+    },
+    "previewRace": {
+      "text": "Second",
+      "preview": [
+        {
+          "kind": "search",
+          "url": "",
+          "artist": "",
+          "title": "First"
+        }
+      ]
+    },
+    "modalSemantics": {
+      "focused": "open-settings",
+      "dialogRole": null,
+      "ariaModal": null
+    },
+    "bulkEscape": {
+      "stillOpen": true
+    }
+  },
+  "startupFailure": {
+    "online": "offline",
+    "formats": 0,
+    "socketCreated": false
+  },
+  "exceptions": [
+    "TypeError: items is not iterable\n    at fillSelect (http://127.0.0.1:8765/static/js/app.js?v=18dbe0271ff0f724:636:20)\n    at refreshFormatOptions (http://127.0.0.1:8765/static/js/app.js?v=18dbe0271ff0f724:187:5)\n    at setMediaType (http://127.0.0.1:8765/static/js/app.js?v=18dbe0271ff0f724:196:3)\n    at hydrate (http://127.0.0.1:8765/static/js/app.js?v=18dbe0271ff0f724:1166:7)\n    at Object.startDashboard (http://127.0.0.1:8765/static/js/startup.js?v=18dbe0271ff0f724:11:5)\n    at async init (http://127.0.0.1:8765/static/js/app.js?v=18dbe0271ff0f724:1159:3)"
+  ]
+}

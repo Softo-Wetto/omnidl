@@ -39,6 +39,10 @@ class MatchDecision:
     raw_score: int = 0
     # Position within its own source's results — that service's relevance judgement.
     rank: int = 0
+    # An official music video. Not a different *song*, but routinely a different *length* —
+    # intros, outros, video edits: Purple Rain's video is 478s against the 521s album track,
+    # Smoke on the Water's 375s against 342s.
+    music_video: bool = False
 
 
 def _normalise(value: str) -> str:
@@ -91,10 +95,20 @@ def artist_aliases(artist: str) -> list[str]:
     return aliases
 
 
+# Spotify names remastered catalogue "Bohemian Rhapsody - Remastered 2011"; uploads of the same
+# recording usually just say "Bohemian Rhapsody". A remaster is the same performance, so the
+# label is dropped before comparing — it used to sink correct matches below "verified".
+_REMASTER_RE = re.compile(
+    r"\s*[-\u2013\u2014]\s*[^-\u2013\u2014()\[\]]*\bremaster(?:ed)?\b[^-\u2013\u2014()\[\]]*$"
+    r"|\s*[(\[][^()\[\]]*\bremaster(?:ed)?\b[^()\[\]]*[)\]]",
+    re.IGNORECASE)
+
+
 def _strip_decorations(title: str) -> str:
     text = _PIPE_TAIL_RE.sub("", title or "")
     text = _CREDIT_GROUP_RE.sub(" ", text)
     text = _DECORATION_RE.sub(" ", text)
+    text = _REMASTER_RE.sub(" ", text)
     text = _CREDIT_TAIL_RE.sub("", text)
     return " ".join(text.split()).strip(" -–—\"'“”")
 
@@ -175,6 +189,18 @@ _VERSION_PATTERNS = {
 _VERSION_RE = {name: re.compile(pattern) for name, pattern in _VERSION_PATTERNS.items()}
 
 
+# Only phrases that name a video release. A bare "video" stays out: it's in real titles
+# ("Video Games", "Video Killed the Radio Star"). Lyric videos and visualizers carry the
+# audio track itself, so they aren't counted.
+_MUSIC_VIDEO_RE = re.compile(
+    r"\bofficial\s+(?:hd\s+|4k\s+)?(?:music\s+)?video\b|\bmusic\s+video\b|\bvideo\s+oficial\b"
+    r"|\bvideoclip\b|\bofficial\s+mv\b|\bm\s*v\b")
+
+
+def is_music_video(title: str, requested: str = "") -> bool:
+    return bool(_MUSIC_VIDEO_RE.search(_normalise(title))) and not _MUSIC_VIDEO_RE.search(_normalise(requested))
+
+
 def version_markers(title: str) -> frozenset[str]:
     text = _normalise(title)
     return frozenset(name for name, rx in _VERSION_RE.items() if rx.search(text))
@@ -243,8 +269,8 @@ def _reason(title_similarity: float, artist_similarity: float,
         return "artist similarity below 80%"
     if title_similarity < 0.8:
         return "title similarity below 80%"
-    if duration_difference is not None and duration_difference > 20:
-        return "duration differs by more than 20 seconds"
+    if duration_difference is not None and duration_difference > _MAX_DURATION_DIFFERENCE:
+        return f"duration differs by more than {_MAX_DURATION_DIFFERENCE} seconds"
     threshold = 85 if duration_difference is not None else 90
     if score < threshold:
         return f"match score below {threshold}"
@@ -277,6 +303,7 @@ def decide_match(artist: str, title: str, duration: int, candidate: Candidate, *
         version_mismatch=markers,
         raw_score=raw,
         rank=rank,
+        music_video=is_music_video(candidate.title, title),
     )
 
 
@@ -310,13 +337,21 @@ def is_preview_clip(decisions, expected_duration: int = 0):
 _CONSENSUS_WINDOW = 5
 _SOURCE_WEIGHT = {"youtube_music": 1.25, "youtube": 1.0, "soundcloud": 0.75}
 _RANK_DECAY = 0.35
+# YouTube Music's own song entry (the streaming release) counts for this much on its own.
+_OFFICIAL_WEIGHT = 2.0
 
 
 def _vote(decision: MatchDecision) -> float:
     """How much one upload's length counts. A service's top results speak louder than its
     sixth: counted equally, three deep radio-edit uploads (237s) outvoted "A Sky Full of
     Stars" being YouTube Music's #1 and YouTube's #2 result at the album length (268s)."""
-    return _SOURCE_WEIGHT.get(decision.candidate.source, 0.5) / (1 + _RANK_DECAY * decision.rank)
+    weight = _OFFICIAL_WEIGHT if _is_official_entry(decision) else _SOURCE_WEIGHT.get(decision.candidate.source, 0.5)
+    return weight / (1 + _RANK_DECAY * decision.rank)
+
+
+def _is_official_entry(d: MatchDecision) -> bool:
+    return (d.candidate.source == "youtube_music" and d.candidate.official
+            and d.artist_similarity >= 0.9 and d.title_similarity >= 0.9)
 
 
 def consensus_duration(decisions: list[MatchDecision]) -> int:
@@ -330,12 +365,15 @@ def consensus_duration(decisions: list[MatchDecision]) -> int:
     """
     voters = [d for d in decisions
               if d.candidate.duration > _PREVIEW_MAX_SECONDS and not d.version_mismatch
+              and not d.music_video
               and d.artist_similarity >= 0.8 and d.title_similarity >= 0.8]
     best: tuple[float, int, int, int] | None = None     # (support, has_ytm, -rank, duration)
     for pivot in voters:
         members = [v for v in voters
                    if abs(v.candidate.duration - pivot.candidate.duration) <= _CONSENSUS_WINDOW]
-        if len(members) < 2:
+        # One ordinary upload agreeing with itself proves nothing; YouTube Music's own entry
+        # for the song can stand alone — it's outvoted only by several uploads that agree.
+        if len(members) < 2 and not any(_is_official_entry(m) for m in members):
             continue
         support = sum(_vote(m) for m in members)
         ytm = [m for m in members if m.candidate.source == "youtube_music"]
@@ -346,8 +384,38 @@ def consensus_duration(decisions: list[MatchDecision]) -> int:
     return best[3] if best else 0
 
 
+def _plain(text: str) -> str:
+    return _normalise(_UPLOADER_NOISE_RE.sub("", text or ""))
+
+
+def reference_duration(decisions: list[MatchDecision], artist: str, title: str) -> tuple[int, str]:
+    """The song's real length when nobody supplied one, and where it came from.
+
+    A typed song has no Spotify length to check against, which is how music videos and
+    alternate edits got through: their uploads outnumber the album track's. So:
+      1. the length uploads agree on, with YouTube Music's own song entry as a heavy vote
+         (it settles Dai Dai alone, but four uploads at 174s outvote its 227s One Dance);
+      2. failing that, the artist's own upload under exactly this title.
+    Music videos, previews and other versions never count (see consensus_duration).
+    """
+    agreed = consensus_duration(decisions)
+    if agreed:
+        return agreed, "agreeing uploads"
+    names = {_plain(alias) for alias in artist_aliases(artist)}
+    own = [d for d in decisions
+           if d.candidate.duration > _PREVIEW_MAX_SECONDS and not d.version_mismatch
+           and not d.music_video and _plain(d.candidate.artist) in names and d.title_similarity >= 0.95]
+    if own:
+        return min(own, key=lambda d: (d.rank, d.candidate.source)).candidate.duration, "the artist's upload"
+    return 0, ""
+
+
 # ---- choosing ------------------------------------------------------------------------------
-_MAX_DURATION_DIFFERENCE = 20
+# A copy of the same recording is within a few seconds of it (fades, encoder padding);
+# alternate edits differ by more. 20s let a 15s-shorter "single edit" through as a match.
+_MAX_DURATION_DIFFERENCE = 10
+# A music video only stands in for the song when it's verifiably the same length.
+_MUSIC_VIDEO_TOLERANCE = 3
 _ELIGIBLE_ARTIST_SIMILARITY = 0.6
 
 
@@ -355,8 +423,9 @@ _ELIGIBLE_ARTIST_SIMILARITY = 0.6
 class Choice:
     decisions: list[MatchDecision]      # every candidate, best first
     eligible: list[MatchDecision]       # safe to download, best first
-    expected_duration: int              # Spotify's length, the consensus length, or 0
-    anchored: bool = False              # expected_duration came from consensus
+    expected_duration: int              # Spotify's length, a reference length, or 0
+    anchored: bool = False              # expected_duration came from reference_duration()
+    reference: str = ""                 # where that length came from, for the review report
 
 
 def choose(artist: str, title: str, duration: int, candidates: list[Candidate], *,
@@ -377,9 +446,9 @@ def choose(artist: str, title: str, duration: int, candidates: list[Candidate], 
 
     expected = duration if use_duration else 0
     decisions = decide(expected)
-    anchored = False
+    anchored, reference = False, ("Spotify" if expected else "")
     if use_duration and not expected:
-        anchor = consensus_duration(decisions)
+        anchor, reference = reference_duration(decisions, artist, title)
         if anchor:
             expected, anchored = anchor, True
             decisions = decide(expected)
@@ -395,6 +464,7 @@ def choose(artist: str, title: str, duration: int, candidates: list[Candidate], 
             not preview(d),
             not d.version_mismatch,
             within_duration(d),
+            not d.music_video,
             d.accepted,
             d.raw_score,
             source_rank.get(d.candidate.source, 0),
@@ -409,10 +479,12 @@ def choose(artist: str, title: str, duration: int, candidates: list[Candidate], 
         if not preview(d)
         and not d.version_mismatch
         and within_duration(d)
+        and not (d.music_video and (d.duration_difference is None
+                                    or d.duration_difference > _MUSIC_VIDEO_TOLERANCE))
         and d.artist_similarity >= _ELIGIBLE_ARTIST_SIMILARITY
         and (d.accepted or title_is_plausible(title, clean_title(d.candidate.title, artist)[0]))
     ]
-    return Choice(decisions, eligible, expected, anchored)
+    return Choice(decisions, eligible, expected, anchored, reference)
 
 
 def same_recording(fallback: MatchDecision, reference: MatchDecision) -> bool:

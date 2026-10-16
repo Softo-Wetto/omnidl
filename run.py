@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import uvicorn
 
+from app import instance
+
 # Bind locally by default; set OMNIDL_HOST=0.0.0.0 (behind a reverse proxy) to publish.
 HOST = os.environ.get("OMNIDL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("OMNIDL_PORT", "8000"))
@@ -90,21 +92,45 @@ def _wait_for_port_to_close(timeout_seconds: float = PORT_WAIT_SECONDS) -> bool:
     return not _is_port_open()
 
 
-def _restart_existing_server() -> None:
-    pids = _listening_pids_on_port()
-    if not pids:
-        return
+def _prepare_port(force_restart: bool = False) -> str:
+    """Make the port usable, or explain why not. Returns the instance.decide() action taken.
 
-    print(f"Restarting OmniDL: stopping existing server on {HOST}:{PORT}...")
-    for pid in sorted(pids):
-        print(f"Stopping process {pid}")
-        _terminate_process_tree(pid)
-
-    if not _wait_for_port_to_close():
+    Never terminates a process it can't confirm is OmniDL: an unrelated program on the port
+    is reported and left alone, and a busy OmniDL is reused rather than cut off mid-download.
+    """
+    is_open = instance.port_open(PORT)
+    info = instance.probe(PORT) if is_open else None
+    action = instance.decide(is_open, info, instance.build_id(), force_restart)
+    if action == "occupied":
         raise SystemExit(
-            f"Port {PORT} is still in use after stopping existing process(es): "
-            f"{', '.join(str(pid) for pid in sorted(pids))}"
+            f"Port {PORT} is being used by another program, so OmniDL can't start there.\n"
+            f"Close that program, or run OmniDL on another port: set OMNIDL_PORT=8001 "
+            f"(and change service: in the tunnel config if you use remote access)."
         )
+    if action == "reuse-busy":
+        print(f"OmniDL is already running with {info.get('active')} download(s) in progress - "
+              f"opening it instead of restarting. (Use --restart to restart anyway.)")
+    elif action == "reuse":
+        print("OmniDL is already running - opening it.")
+    elif action == "restart":
+        print("Restarting OmniDL so it runs the latest code...")
+        _stop_instance(info)
+    return action
+
+
+def _stop_instance(info: dict) -> None:
+    """Ask the running OmniDL to shut down cleanly; force it only if it's verifiably OmniDL."""
+    if instance.request_shutdown(PORT) and _wait_for_port_to_close(20.0):
+        return
+    pid = info.get("pid")
+    # Forced stop only for the process that identified itself as OmniDL AND holds the port.
+    if isinstance(pid, int) and pid in _listening_pids_on_port():
+        print(f"OmniDL didn't stop cleanly; stopping process {pid}.")
+        _terminate_process_tree(pid)
+        if _wait_for_port_to_close():
+            return
+    raise SystemExit(f"Couldn't stop the OmniDL already running on port {PORT}. "
+                     "Close its window and try again.")
 
 
 def _open_browser() -> None:
@@ -149,7 +175,11 @@ def _start_pot_provider() -> subprocess.Popen | None:
 
 
 if __name__ == "__main__":
-    _restart_existing_server()
+    action = _prepare_port(force_restart="--restart" in sys.argv)
+    if action in ("reuse", "reuse-busy"):
+        if HOST in _LOCAL_HOSTS and "--no-browser" not in sys.argv:
+            webbrowser.open(f"http://127.0.0.1:{PORT}/dashboard")
+        raise SystemExit(0)
     pot_proc = _start_pot_provider()
     print(f"OmniDL running at http://{HOST}:{PORT}  (Ctrl+C to stop)")
     if HOST in _LOCAL_HOSTS and "--no-browser" not in sys.argv:

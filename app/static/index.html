@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -59,88 +59,125 @@
 
       <div class="header-utilities">
         <span id="remote-badge" class="remote-badge" title="You're using the OmniDL running on your home PC — downloads land in its library" hidden>&#127968;<span class="remote-text"> Home PC</span></span>
-        <span id="conn" class="conn off" title="Connection status"><i></i>offline</span>
+        <span id="conn" class="conn off" role="status" title="Connection status"><i></i>offline</span>
         <button id="theme-toggle" class="header-icon" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">☀</button>
       </div>
     </div>
   </header>
 
+  <!-- Shown while the live connection is down, or when the page couldn't load its settings. -->
+  <div id="conn-banner" class="conn-banner" role="status" aria-live="polite" hidden>
+    <span id="conn-banner-text"></span>
+    <button id="conn-banner-retry" type="button" class="ghost small" hidden>Retry</button>
+  </div>
+
   <section class="smartbar">
     <div class="smartbar-card">
       <div class="smartbar-row">
         <div class="input-wrap">
-          <span class="input-ico">🔎</span>
-          <input id="input" type="text" autocomplete="off" spellcheck="false"
+          <span class="input-ico" aria-hidden="true">🔎</span>
+          <label for="input" class="sr-only">Link or song to download</label>
+          <input id="input" type="text" autocomplete="off" spellcheck="false" aria-describedby="hint"
                  placeholder="Paste a link, or type a song — e.g. drake one dance" />
         </div>
-        <select id="engine" title="Engine">
+        <select id="engine" title="Source" aria-label="Source">
           <option value="auto">Auto-detect</option>
           <option value="spotify">Spotify</option>
           <option value="youtube">YouTube</option>
           <option value="soundcloud">SoundCloud</option>
         </select>
         <div id="media-toggle" class="media-toggle" role="group" aria-label="Audio or video">
-          <button type="button" class="mt-btn active" data-media="audio" title="Download audio">♪ Audio</button>
-          <button type="button" class="mt-btn" data-media="video" title="Download video — YouTube &amp; links only">▶ Video</button>
+          <button type="button" class="mt-btn active" data-media="audio" aria-pressed="true" title="Download audio">♪ Audio</button>
+          <button type="button" class="mt-btn" data-media="video" aria-pressed="false" title="Download video — YouTube &amp; links only">▶ Video</button>
         </div>
-        <select id="format" title="Audio format"></select>
+        <select id="format" title="Audio format" aria-label="Audio format"></select>
         <button id="open-bulk" class="ghost" title="Paste a list of songs, one per line">☰ Bulk</button>
-        <button id="download" class="primary">Download <span class="arr">▸</span></button>
+        <button id="download" class="primary">Download <span class="arr" aria-hidden="true">▸</span></button>
       </div>
       <div class="smartbar-meta">
         <span id="detected" class="chip" hidden></span>
         <span class="hint" id="hint"></span>
       </div>
     </div>
+    <!-- Phones: the download in progress (or just finished) with its actions, above the log. -->
+    <section id="now-card" class="now-card" aria-label="Current download" hidden></section>
   </section>
 
-  <main class="workspace">
-    <div class="terminal-wrap panel">
+  <main class="workspace" id="workspace">
+    <div class="terminal-wrap panel" id="terminal-wrap">
       <div class="titlebar">
-        <div class="dots"><i class="r"></i><i class="y"></i><i class="g"></i></div>
-        <span class="title">live output</span>
+        <div class="dots" aria-hidden="true"><i class="r"></i><i class="y"></i><i class="g"></i></div>
+        <span class="title" id="term-title">live output</span>
+        <button id="toggle-term" class="ghost small term-toggle" aria-expanded="true" aria-controls="terminal-host">Hide</button>
         <button id="copy-log" class="ghost small" title="Copy log">⧉ Copy</button>
-        <button id="clear-term" class="ghost small">Clear</button>
+        <button id="clear-term" class="ghost small" title="Clear the screen (the job's log is kept)">Clear</button>
       </div>
       <div id="terminal-host" class="terminal-host">
-        <div id="log" class="log"></div>
+        <div id="log" class="log" role="log" aria-labelledby="term-title" tabindex="0"></div>
         <button id="jump-latest" class="jump-latest hidden">↓ Jump to latest</button>
         <div id="term-empty" class="empty-state">
-          <div class="empty-emoji">🎧</div>
+          <div class="empty-emoji" aria-hidden="true">🎧</div>
           <p>Paste a link or type a song above, then hit <b>Download</b>.</p>
           <p class="dim">Live progress streams here.</p>
         </div>
       </div>
     </div>
 
-    <aside class="queue-wrap panel">
+    <div id="splitter" class="splitter" role="separator" aria-orientation="vertical" tabindex="0"
+         aria-label="Resize the downloads panel" aria-valuemin="260" aria-valuemax="640" aria-valuenow="340"></div>
+
+    <aside class="queue-wrap panel" aria-label="Downloads">
       <div class="panel-head">
-        <span>Queue &amp; history</span>
+        <span>Downloads</span>
         <span id="queue-summary" class="summary"></span>
       </div>
-      <div class="queue-actions">
-        <button id="cancel-all" class="ghost small btn-danger">Cancel all</button>
-        <button id="clear-done" class="ghost small">Clear finished</button>
-      </div>
-      <ul id="queue" class="queue"></ul>
-      <div id="queue-empty" class="empty-state small">
-        <div class="empty-emoji" style="font-size:28px">🗂️</div>
-        <p class="dim">No downloads yet.</p>
-        <p class="dim" style="font-size:11px">Queued &amp; finished jobs show up here.</p>
-        <p id="hosted-hint" class="dim" style="font-size:11px;margin-top:8px" hidden>
-          When a job finishes, click <b>⤓ Save</b> to download it to this device.<br>
-          Files are kept on the server for 30 minutes, then deleted.
-        </p>
+      <div class="queue-scroll">
+        <section id="active-section" class="queue-section" aria-labelledby="active-heading" hidden>
+          <div class="queue-section-head">
+            <h2 id="active-heading">In progress</h2>
+            <button id="cancel-all" class="ghost small btn-danger" title="Stop everything that's queued or downloading">Cancel all</button>
+          </div>
+          <ul id="active-queue" class="queue"></ul>
+        </section>
+        <section id="history-section" class="queue-section" aria-labelledby="history-heading" hidden>
+          <div class="queue-section-head">
+            <h2 id="history-heading">History</h2>
+            <button id="clear-done" class="ghost small">Clear history</button>
+          </div>
+          <div class="history-tools">
+            <label for="history-filter" class="sr-only">Show</label>
+            <select id="history-filter">
+              <option value="all">All</option>
+              <option value="done">Completed</option>
+              <option value="issues">With issues</option>
+              <option value="error">Failed</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+            <label for="history-search" class="sr-only">Search history</label>
+            <input id="history-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search history" />
+          </div>
+          <ul id="queue" class="queue"></ul>
+          <p id="history-none" class="history-none" hidden>No downloads match.</p>
+        </section>
+        <div id="queue-empty" class="empty-state small">
+          <div class="empty-emoji" style="font-size:28px" aria-hidden="true">🗂️</div>
+          <p class="dim">No downloads yet.</p>
+          <p class="dim">Queued &amp; finished jobs show up here.</p>
+          <p id="hosted-hint" class="dim" hidden>
+            When a job finishes, click <b>⤓ Save</b> to download it to this device.<br>
+            <span id="hosted-ttl">Files are kept on the server for a while, then deleted.</span>
+          </p>
+        </div>
       </div>
     </aside>
   </main>
 
   <!-- Settings modal -->
   <div id="settings-modal" class="modal hidden">
-    <div class="modal-box">
+    <div class="modal-box settings-box" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="modal-head">
-        <h2><span class="ico">⚙</span> Settings</h2>
-        <button id="close-settings" class="ghost icon-only">✕</button>
+        <h2 id="settings-title"><span class="ico" aria-hidden="true">⚙</span> Settings</h2>
+        <button id="close-settings" class="ghost icon-only" aria-label="Close settings">✕</button>
       </div>
       <div class="modal-body">
         <div class="field-note">
@@ -149,40 +186,16 @@
           login, no Premium) and the audio is matched on YouTube.
         </div>
 
-        <div class="section-label">Matching</div>
-        <label class="switch-row">
-          <span>Prefer YouTube Music <span class="muted">(official "Topic" audio — no music-video intros/outros)</span></span>
-          <input id="set-prefer-ytmusic" type="checkbox" class="switch" />
-        </label>
-        <label class="switch-row">
-          <span>Match result to track length <span class="muted">(avoids mixes / live edits)</span></span>
-          <input id="set-match-duration" type="checkbox" class="switch" />
-        </label>
-
-        <div class="section-label">Audio &amp; video</div>
-        <label id="output-dir-field" hidden>Output folder <span class="muted">(where files are saved)</span>
-          <input id="set-output-dir" type="text" autocomplete="off" spellcheck="false" />
-        </label>
-        <label id="cookie-file-field" hidden>Cookies file <span class="muted">(optional cookies.txt — best fix for YouTube "unavailable" errors)</span>
-          <input id="set-cookie-file" type="text" autocomplete="off" spellcheck="false"
-                 placeholder="C:\path\to\cookies.txt" />
-        </label>
-        <div class="settings-control-grid">
-          <label class="settings-field">
-            <span class="settings-field-heading"><span class="settings-field-title">Audio format</span></span>
-            <select id="set-format"></select>
-          </label>
-          <label class="settings-field">
-            <span class="settings-field-heading"><span class="settings-field-title">Bitrate</span></span>
-            <input id="set-bitrate" type="text" placeholder="320k / auto / disable" />
-          </label>
-          <label class="settings-field">
-            <span class="settings-field-heading">
-              <span class="settings-field-title">Video container</span>
-              <span class="settings-field-help">Video downloads</span>
-            </span>
-            <select id="set-video-container"></select>
-          </label>
+        <div class="section-label">Where files go</div>
+        <div id="output-dir-field" class="settings-block" hidden>
+          <label for="set-output-dir">Output folder <span class="muted" id="output-dir-scope">(where files are saved)</span></label>
+          <input id="set-output-dir" type="text" autocomplete="off" spellcheck="false"
+                 aria-describedby="output-dir-error output-dir-where" />
+          <p id="output-dir-error" class="field-error" role="alert" hidden></p>
+          <p id="output-dir-where" class="field-help"></p>
+        </div>
+        <p id="hosted-destination" class="field-help" hidden></p>
+        <div class="settings-control-grid two">
           <label class="settings-field">
             <span class="settings-field-heading"><span class="settings-field-title">File naming</span></span>
             <select id="set-naming-order"></select>
@@ -191,27 +204,75 @@
             <span class="settings-field-heading"><span class="settings-field-title">Artists in name</span></span>
             <select id="set-naming-artists"></select>
           </label>
-          <label class="settings-field">
-            <span class="settings-field-heading">
-              <span class="settings-field-title">Parallel downloads</span>
-              <span class="settings-field-help">Playlists only</span>
-            </span>
-            <input id="set-concurrency" type="number" min="1" max="4" />
-          </label>
         </div>
         <div class="settings-preview">
           <span class="settings-preview-label">Filename preview</span>
           <code id="naming-preview">—</code>
           <span class="settings-preview-note">Match your existing library naming to avoid duplicates.</span>
         </div>
+
+        <div class="section-label">Format &amp; quality</div>
+        <div class="settings-control-grid">
+          <label class="settings-field">
+            <span class="settings-field-heading"><span class="settings-field-title">Audio format</span></span>
+            <select id="set-format" aria-describedby="format-notes"></select>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-heading">
+              <span class="settings-field-title">Bitrate</span>
+              <span class="settings-field-help">When converting</span>
+            </span>
+            <select id="set-bitrate" aria-describedby="format-notes"></select>
+          </label>
+          <label class="settings-field">
+            <span class="settings-field-heading">
+              <span class="settings-field-title">Video container</span>
+              <span class="settings-field-help">Video downloads</span>
+            </span>
+            <select id="set-video-container"></select>
+          </label>
+        </div>
+        <ul id="format-notes" class="format-notes"></ul>
+
+        <div class="section-label">Matching</div>
+        <label class="switch-row">
+          <span>Only download verified matches <span class="muted">(recommended — anything that can't be confirmed as this exact song and version goes to the review report, with links, instead of your library)</span></span>
+          <input id="set-strict" type="checkbox" class="switch" />
+        </label>
+        <label class="switch-row">
+          <span>Prefer YouTube Music <span class="muted">(official "Topic" audio — no music-video intros/outros)</span></span>
+          <input id="set-prefer-ytmusic" type="checkbox" class="switch" />
+        </label>
+        <label class="switch-row">
+          <span>Match result to track length <span class="muted">(avoids mixes / live edits)</span></span>
+          <input id="set-match-duration" type="checkbox" class="switch" />
+        </label>
+        <label class="switch-row">
+          <span>Skip already-downloaded tracks <span class="muted">(checks your library in every format)</span></span>
+          <input id="set-skip-existing" type="checkbox" class="switch" />
+        </label>
         <label class="switch-row">
           <span>Trim non-music segments <span class="muted">(SponsorBlock: intros/outros/ads)</span></span>
           <input id="set-sponsorblock" type="checkbox" class="switch" />
         </label>
-        <label class="switch-row">
-          <span>Skip already-downloaded tracks <span class="muted">(resume playlists)</span></span>
-          <input id="set-skip-existing" type="checkbox" class="switch" />
-        </label>
+
+        <div class="section-label">Speed</div>
+        <div class="settings-control-grid one">
+          <label class="settings-field">
+            <span class="settings-field-heading">
+              <span class="settings-field-title">Parallel downloads</span>
+              <span class="settings-field-help">Playlists and lists</span>
+            </span>
+            <input id="set-concurrency" type="number" min="1" max="4" />
+          </label>
+        </div>
+
+        <div id="cookie-file-field" class="settings-block" hidden>
+          <div class="section-label">YouTube account</div>
+          <label for="set-cookie-file">Cookies file <span class="muted">(optional cookies.txt — the fix for YouTube "confirm you're not a bot" and "unavailable" errors; export it while signed in to youtube.com)</span></label>
+          <input id="set-cookie-file" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="C:\path\to\cookies.txt" />
+        </div>
 
         <div id="maintenance" hidden>
           <div class="section-label">Maintenance</div>
@@ -222,8 +283,8 @@
           </div>
         </div>
       </div>
-      <div class="modal-foot">
-        <span id="settings-status" class="status-msg"></span>
+      <div class="modal-foot sticky-foot">
+        <span id="settings-status" class="status-msg" role="status" aria-live="polite"></span>
         <button id="save-settings" class="primary">Save</button>
       </div>
     </div>
@@ -231,20 +292,27 @@
 
   <!-- Local music library modal -->
   <div id="library-modal" class="modal hidden">
-    <div class="modal-box library-modal-box">
+    <div class="modal-box library-modal-box" role="dialog" aria-modal="true" aria-labelledby="library-title">
       <div class="modal-head">
         <div>
-          <h2><span class="ico">&#9835;</span> Music library</h2>
+          <h2 id="library-title"><span class="ico" aria-hidden="true">&#9835;</span> Music library</h2>
           <p class="library-subtitle">Review metadata, quality and duplicates without deleting or overwriting files.</p>
         </div>
-        <button id="close-library" class="ghost icon-only">&#10005;</button>
+        <button id="close-library" class="ghost icon-only" aria-label="Close music library">&#10005;</button>
       </div>
       <div class="library-toolbar">
-        <input id="library-search" type="text" autocomplete="off" spellcheck="false"
+        <label for="library-search" class="sr-only">Filter the library</label>
+        <input id="library-search" type="search" autocomplete="off" spellcheck="false"
                placeholder="Filter by artist, title or path..." />
+        <label class="library-order" for="library-order">Untagged files are named
+          <select id="library-order">
+            <option value="artist-title">Artist - Title</option>
+            <option value="title-artist">Title - Artist</option>
+          </select>
+        </label>
         <button id="scan-library" class="primary">Scan library</button>
       </div>
-      <div id="library-status" class="library-status">Scan your configured output folder to begin.</div>
+      <div id="library-status" class="library-status" role="status" aria-live="polite">Scan your configured output folder to begin.</div>
       <div id="library-summary" class="library-summary hidden"></div>
       <div class="library-body">
         <section id="library-duplicates-section" class="library-section hidden">
@@ -262,18 +330,19 @@
           <div id="library-issues" class="library-list"></div>
         </section>
         <div id="library-empty" class="library-empty hidden">
-          <strong>Your library looks clean.</strong>
-          <span>No metadata problems or duplicate groups were found.</span>
+          <strong id="library-empty-title">Your library looks clean.</strong>
+          <span id="library-empty-text">No metadata problems or duplicate groups were found.</span>
+          <button id="library-clear-filter" type="button" class="ghost small" hidden>Clear filter</button>
         </div>
       </div>
     </div>
   </div>
   <!-- Access gate: only shown when the server has a passphrase configured -->
   <div id="unlock-modal" class="modal hidden">
-    <div class="modal-box" style="max-width:440px">
+    <div class="modal-box" style="max-width:440px" role="dialog" aria-modal="true" aria-labelledby="unlock-title">
       <div class="modal-head">
-        <h2><span class="ico">🔑</span> Unlock YouTube &amp; Spotify</h2>
-        <button id="close-unlock" class="ghost icon-only">✕</button>
+        <h2 id="unlock-title"><span class="ico" aria-hidden="true">🔑</span> Unlock YouTube &amp; Spotify</h2>
+        <button id="close-unlock" class="ghost icon-only" aria-label="Close">✕</button>
       </div>
       <div class="modal-body">
         <div class="field-note">
@@ -283,9 +352,9 @@
         </div>
         <label>Access passphrase
           <input id="unlock-input" type="password" autocomplete="current-password"
-                 placeholder="Enter passphrase" />
+                 placeholder="Enter passphrase" aria-describedby="unlock-error" />
         </label>
-        <p id="unlock-error" class="hint" style="color:var(--red);min-height:16px"></p>
+        <p id="unlock-error" class="hint" role="alert" style="color:var(--red);min-height:16px"></p>
       </div>
       <div class="modal-foot">
         <span class="status-msg"></span>
@@ -295,14 +364,14 @@
   </div>
 
   <div id="bulk-modal" class="modal hidden">
-    <div class="modal-box bulk-modal-box">
+    <div class="modal-box bulk-modal-box" role="dialog" aria-modal="true" aria-labelledby="bulk-title">
       <div class="modal-head">
-        <h2><span class="ico">☰</span> Bulk paste</h2>
-        <button id="close-bulk" class="ghost icon-only">✕</button>
+        <h2 id="bulk-title"><span class="ico" aria-hidden="true">☰</span> Bulk paste</h2>
+        <button id="close-bulk" class="ghost icon-only" aria-label="Close bulk paste (your list is kept)">✕</button>
       </div>
       <div class="modal-body">
         <label>Paste your list — one song per line
-          <textarea id="bulk-text" rows="7" spellcheck="false"
+          <textarea id="bulk-text" rows="7" spellcheck="false" aria-describedby="bulk-summary"
                     placeholder="Bridesmaid entrance song - Con Gai Mien Tay by Luong Khanh Vy&#10;Groomsman entrance song - Mr Strong Man by George Lam&#10;Groom &amp; Bride Entrance song - Shanghai Bund by Frances Yip&#10;&#10;Katy Perry - Teenage Dream&#10;https://open.spotify.com/playlist/…"></textarea>
         </label>
         <div class="row">
@@ -321,25 +390,31 @@
           <input id="bulk-strip" type="checkbox" class="switch" checked />
           <span>Ignore labels in front of songs <span class="muted">(e.g. “Bridesmaid entrance song - ”; real title parts like “- Live” are kept)</span></span>
         </label>
-        <p class="hint" id="bulk-summary">—</p>
-        <div id="bulk-preview" class="bulk-preview"></div>
+        <p class="hint" id="bulk-summary" role="status" aria-live="polite">—</p>
+        <p id="bulk-cap" class="bulk-cap" role="alert" hidden></p>
+        <div id="bulk-preview" class="bulk-preview" aria-label="Songs in your list"></div>
         <p class="field-note">
           Spotify can't be searched by text — it has no public search and serves no audio —
           so pasted <em>links</em> still resolve through Spotify, while typed song names are
           found on YouTube&nbsp;Music, YouTube and SoundCloud. Every line is matched against
-          your library first, so anything you already own is skipped.
+          your library first, so anything you already own is skipped. Your list is kept if you
+          close this window.
         </p>
       </div>
       <div class="modal-foot">
-        <span class="status-msg" id="bulk-status"></span>
-        <button id="do-bulk" class="primary">Download</button>
+        <span class="status-msg" id="bulk-status" role="status" aria-live="polite"></span>
+        <div class="foot-actions">
+          <button id="clear-bulk" type="button" class="ghost">Clear list</button>
+          <button id="do-bulk" class="primary" disabled>Download</button>
+        </div>
       </div>
     </div>
   </div>
 
-  <div id="toasts" class="toasts"></div>
+  <div id="toasts" class="toasts" aria-live="polite" aria-relevant="additions"></div>
 
   <script src="/static/js/startup.js"></script>
+  <script src="/static/js/core.js"></script>
   <script src="/static/js/app.js"></script>
 </body>
 </html>

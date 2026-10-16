@@ -68,6 +68,20 @@ def _serve() -> None:
         time.sleep(1.5)
         webbrowser.open(f"http://127.0.0.1:{PORT}")
 
+    from app import instance
+
+    if instance.port_open(PORT):
+        # Never kill whatever holds the port: reuse a running OmniDL, otherwise explain.
+        if instance.probe(PORT) is None:
+            print(f"Port {PORT} is being used by another program, so OmniDL can't start there. "
+                  f"Close it, or set OMNIDL_PORT to another port.")
+            input("Press Enter to close...")
+            return
+        print("OmniDL is already running - opening it.")
+        if HOST in _LOCAL_HOSTS and "--no-browser" not in sys.argv:
+            webbrowser.open(f"http://127.0.0.1:{PORT}/dashboard")
+        return
+
     from app.main import app
 
     # Only pop a browser for a local, interactive launch — not when hosting headless.

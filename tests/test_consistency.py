@@ -122,24 +122,24 @@ class PhraseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(("Drake", "One Dance"), (result.track.artist, result.track.title))
         self.assertEqual("Drake - One Dance.opus", result.saved_as)
 
-    async def test_an_unidentifiable_phrase_falls_back_to_youtubes_top_result_for_review(self):
+    async def test_an_unidentifiable_phrase_is_not_downloaded_on_a_guess(self):
+        """It used to download YouTube's top result for the words, unverified — how music
+        videos and wrong songs got saved. Now nothing is downloaded and the card says why."""
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = JobManager()
             job = Job("x", "youtube", None, "", settings=settings(temp_dir))
-            target = Path(temp_dir) / "lofi beats to study to.opus"
-            urls = []
-
-            async def download(_job, argv, emit, **kwargs):
-                urls.append(argv[-1])
-                target.touch()
-                return 0
+            run = AsyncMock(return_value=0)
 
             with patch("app.jobs.candidate_search.resolve_phrase", return_value=None), \
-                 patch.object(manager, "_stream_subprocess", side_effect=download):
+                 patch("app.jobs.candidate_search.search_all") as search, \
+                 patch.object(manager, "_stream_subprocess", run):
                 result = await manager._fetch_track(job, Track("", "lofi beats to study to"), job.settings, True, 1, 1)
 
-        self.assertEqual(["ytsearch1:lofi beats to study to"], urls)
-        self.assertEqual("downloaded_for_review", result.status)
+        run.assert_not_awaited()
+        search.assert_not_called()
+        self.assertEqual("no_candidate", result.status)
+        self.assertIn("Artist - Title", result.reason)
+        self.assertEqual([], job.produced)
 
 
 class RetryTests(unittest.IsolatedAsyncioTestCase):

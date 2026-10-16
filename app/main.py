@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import html
 import mimetypes
+import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -21,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import bulk_input, candidate_search, engines, library, sessions, settings as settings_mod
+from . import bulk_input, candidate_search, engines, instance, library, sessions, settings as settings_mod
 from . import power, remote_access, tunnel
 from . import spotify_resolver as sr
 from .jobs import JobManager
@@ -150,7 +152,9 @@ async def lifespan(app: FastAPI):
     if settings_mod.LOCAL_MODE:
         cfg = remote_access.load_config()
         ACCESS = remote_access.AccessVerifier.from_config()
-        running_tunnel = tunnel.start_from_config(cfg)
+        # OMNIDL_NO_TUNNEL=1: a second copy (tests, a dev run on another port) mustn't add a
+        # connector to the real tunnel and take a share of its traffic.
+        running_tunnel = None if os.environ.get("OMNIDL_NO_TUNNEL") else tunnel.start_from_config(cfg)
         if running_tunnel and not (ACCESS.team and ACCESS.aud):
             print("[OmniDL] Remote access: no Cloudflare Access app found yet — remote requests "
                   "are refused until one protects this address.")
@@ -400,7 +404,12 @@ async def post_settings(request: Request, payload: dict):
         if "cookie_file" in payload and isinstance(payload["cookie_file"], str):
             updates["cookie_file"] = payload["cookie_file"].strip()
         if updates:
-            settings_mod.save_settings(updates)
+            try:
+                settings_mod.save_settings(updates)
+            except settings_mod.SettingsError as exc:
+                return JSONResponse({"error": str(exc), "field": exc.field}, status_code=400)
+            except OSError as exc:
+                return JSONResponse({"error": f"Couldn't save settings: {exc}"}, status_code=500)
     else:
         SESSION_PREFS.setdefault(_sid(request), {}).update(cleaned)
     result = settings_mod.public_settings(_prefs(request))
@@ -426,6 +435,12 @@ async def meta(request: Request):
         "max_concurrency": settings_mod.MAX_CONCURRENCY,
         "naming_orders": settings_mod.NAMING_ORDERS,
         "naming_artists": settings_mod.NAMING_ARTISTS,
+        "bitrates": settings_mod.BITRATES,
+        # Formats a SoundCloud link can't be saved as exactly, and what happens instead.
+        "soundcloud_format_notes": {fmt: note for fmt in settings_mod.AUDIO_FORMATS
+                                    if (note := engines.soundcloud_format_note(fmt))},
+        # How long a hosted copy is kept for Save before it's deleted.
+        "file_ttl": settings_mod.FILE_TTL_SECONDS,
         "frozen": bool(engines.FROZEN),
         "ytdlp_version": engines.ytdlp_version(),
         "ytdlp_age_days": engines.ytdlp_age_days(),
@@ -490,21 +505,31 @@ async def unlock(request: Request, payload: dict):
     return response
 
 
+def _library_order(payload: dict | None) -> str:
+    """How untagged filenames are read: as asked, else the naming setting."""
+    order = (payload or {}).get("order")
+    if order in settings_mod.NAMING_ORDERS:
+        return order
+    return settings_mod.load_settings().get("naming_order", "artist-title")
+
+
 @app.post("/api/library/scan")
-async def library_scan():
+async def library_scan(payload: dict | None = None):
     """Inspect the configured local output directory without changing any files."""
     if not settings_mod.LOCAL_MODE:
         return JSONResponse({"error": "library management is available in local mode only"}, status_code=403)
     root = Path(settings_mod.load_settings()["output_dir"])
     try:
-        return await asyncio.to_thread(library.scan_library, root)
+        return await asyncio.to_thread(library.scan_library, root, _library_order(payload))
+    except library.LibraryRootError as exc:
+        return JSONResponse({"error": str(exc), "field": "output_dir"}, status_code=400)
     except OSError as exc:
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        return JSONResponse({"error": f"Couldn't read the library: {exc}"}, status_code=500)
 
 
-@app.post("/api/library/repair")
-async def library_repair(payload: dict):
-    """Apply an explicitly requested safe missing-tag repair to one local audio file."""
+@app.post("/api/library/repair/preview")
+async def library_repair_preview(payload: dict):
+    """What a tag repair would write, without writing it."""
     if not settings_mod.LOCAL_MODE:
         return JSONResponse({"error": "library management is available in local mode only"}, status_code=403)
     relative_path = payload.get("path")
@@ -512,7 +537,28 @@ async def library_repair(payload: dict):
         return JSONResponse({"error": "path is required"}, status_code=400)
     root = Path(settings_mod.load_settings()["output_dir"])
     try:
-        return await asyncio.to_thread(library.repair_missing_tags, root, relative_path.strip())
+        return await asyncio.to_thread(library.propose_tags, root, relative_path.strip(),
+                                       _library_order(payload))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except OSError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
+@app.post("/api/library/repair")
+async def library_repair(payload: dict):
+    """Write the artist/title the user confirmed into one local file's missing tags."""
+    if not settings_mod.LOCAL_MODE:
+        return JSONResponse({"error": "library management is available in local mode only"}, status_code=403)
+    relative_path = payload.get("path")
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        return JSONResponse({"error": "path is required"}, status_code=400)
+    values = {key: payload[key].strip() for key in ("artist", "title")
+              if isinstance(payload.get(key), str) and payload[key].strip()}
+    root = Path(settings_mod.load_settings()["output_dir"])
+    try:
+        return await asyncio.to_thread(library.repair_missing_tags, root, relative_path.strip(),
+                                       order=_library_order(payload), **values)
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except OSError as exc:
@@ -557,11 +603,40 @@ def _apply_mode(s: dict, payload: dict) -> None:
         s["video_quality"] = payload["video_quality"]
 
 
+# Replies to recent submissions by their client token. A click whose response was lost (the
+# connection dropped) can be sent again with the same token and gets the original reply
+# instead of queueing the same download twice.
+_RECENT_SUBMITS: dict[tuple[str, str], tuple[float, dict]] = {}
+_SUBMIT_TOKEN_TTL = 300
+
+
+def _replayed(request: Request, payload: dict) -> dict | None:
+    token = payload.get("client_token")
+    if not isinstance(token, str) or not 8 <= len(token) <= 64:
+        return None
+    now = time.time()
+    for key, (when, _reply) in list(_RECENT_SUBMITS.items()):
+        if now - when > _SUBMIT_TOKEN_TTL:
+            _RECENT_SUBMITS.pop(key, None)
+    hit = _RECENT_SUBMITS.get((_sid(request), token))
+    return hit[1] if hit else None
+
+
+def _remember(request: Request, payload: dict, reply: dict) -> dict:
+    token = payload.get("client_token")
+    if isinstance(token, str) and 8 <= len(token) <= 64:
+        _RECENT_SUBMITS[(_sid(request), token)] = (time.time(), reply)
+    return reply
+
+
 @app.post("/api/download")
 async def download(request: Request, payload: dict):
     text = (payload.get("input") or "").strip()
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
+    replay = _replayed(request, payload)
+    if replay is not None:
+        return replay
     override = payload.get("engine_override") or None
     video = payload.get("media_type") == "video"
     service = "youtube" if video else _TEXT_SERVICES.get(override or "", "auto")
@@ -575,8 +650,9 @@ async def download(request: Request, payload: dict):
         return JSONResponse({"error": limit}, status_code=429)
     s = settings_mod.effective_settings(_prefs(request))
     _apply_mode(s, payload)
+    s["_youtube_ok"] = _unlocked(request)
     job = await manager.submit(text, s, sid, override, ip=ip)
-    return job.to_dict()
+    return _remember(request, payload, job.to_dict())
 
 
 # A pasted list is capped so one visitor can't turn one paste into an unbounded download
@@ -630,6 +706,9 @@ async def bulk_download(request: Request, payload: dict):
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         return JSONResponse({"error": "nothing to download"}, status_code=400)
+    replay = _replayed(request, payload)
+    if replay is not None:
+        return replay
     service = payload.get("service")
     service = service if service in candidate_search.SERVICE_SOURCES else "auto"
 
@@ -665,6 +744,7 @@ async def bulk_download(request: Request, payload: dict):
         return JSONResponse({"error": limit}, status_code=429)
     s = settings_mod.effective_settings(_prefs(request))
     _apply_mode(s, {"format": payload.get("format")})
+    s["_youtube_ok"] = _unlocked(request)
 
     jobs, held_back = [], 0
     if tracks:
@@ -675,24 +755,33 @@ async def bulk_download(request: Request, payload: dict):
     # rather than be flattened into a single search. Each becomes its own job, so each is
     # held to the same limits as a link pasted on its own — otherwise one paste of 100 links
     # was 100 jobs past a 3-at-a-time cap.
+    held_urls: list[str] = []
     for url in urls:
         if manager.check_limit(sid, ip, unlimited=owner):
             held_back += 1
+            held_urls.append(url)
             continue
         jobs.append(await manager.submit(url, dict(s), sid, ip=ip))
-    return {"jobs": [j.to_dict() for j in jobs], "tracks": len(tracks),
-            "links": len(urls) - held_back, "links_held_back": held_back}
+    return _remember(request, payload, {
+        "jobs": [j.to_dict() for j in jobs], "tracks": len(tracks),
+        "links": len(urls) - held_back, "links_held_back": held_back,
+        # Which links weren't queued, so the browser can keep exactly those for later.
+        "held_back_urls": held_urls})
 
 
 @app.post("/api/jobs/{job_id}/retry")
-async def retry_job(request: Request, job_id: str):
+async def retry_job(request: Request, job_id: str, failed_only: bool = False):
     """Re-run a job faithfully. The browser only knows a job's display text — for a pasted
-    list that's "Wedding songs (3 tracks)", which it used to search YouTube for."""
+    list that's "Wedding songs (3 tracks)", which it used to search YouTube for.
+
+    failed_only=true re-runs just the tracks that weren't found or wouldn't download, as a
+    list of its own — a 100-song playlist with three misses shouldn't mean 100 more searches.
+    """
     sid = _sid(request)
     old = manager.jobs.get(job_id)
     if old is None or (not settings_mod.LOCAL_MODE and old.session != sid):
         return JSONResponse({"error": "That job no longer exists."}, status_code=404)
-    if old.kind in ("bulk", "search"):
+    if failed_only or old.kind in ("bulk", "search"):
         gated = _needs_account("", old.settings.get("bulk_service") or "auto")
     else:
         gated = _needs_account(old.spotify_url or old.input)
@@ -702,7 +791,9 @@ async def retry_job(request: Request, job_id: str):
     limit = manager.check_limit(sid, ip, unlimited=_tier(request) == "owner")
     if limit:
         return JSONResponse({"error": limit}, status_code=429)
-    result = await manager.retry(job_id, sid, settings_mod.effective_settings(_prefs(request)), ip=ip)
+    s = settings_mod.effective_settings(_prefs(request))
+    s["_youtube_ok"] = _unlocked(request)
+    result = await manager.retry(job_id, sid, s, ip=ip, failed_only=failed_only)
     if isinstance(result, str):
         return JSONResponse({"error": result}, status_code=400)
     return result.to_dict()
@@ -731,7 +822,7 @@ async def job_output(request: Request, job_id: str):
     job = _owned(request, job_id)
     if job is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    return {"id": job.id, "output": job.output, "status": job.status}
+    return {"id": job.id, "output": job.output, "status": job.status, "end": job.appended}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -764,24 +855,40 @@ async def job_file(request: Request, job_id: str):
         media_type = mimetypes.guess_type(f.name)[0] or "application/octet-stream"
         return FileResponse(str(f), media_type=media_type, filename=f.name)
 
-    base = (job.label or job.input or "omnidl").rsplit("/", 1)[-1]
+    base = (job.list_name or job.label or job.input or "omnidl").rsplit("/", 1)[-1]
     zip_name = f"{_safe_name(base)[:60] or 'omnidl'}.zip"
     tmp = tempfile.NamedTemporaryFile(prefix="omnidl_zip_", suffix=".zip", delete=False)
     tmp.close()
+    tmp_path = Path(tmp.name)
+    # Reading gigabytes into a zip on the event loop froze everything else — live progress,
+    # Cancel, other devices — until it finished. It runs on a worker thread instead, and only
+    # a couple at once so several Saves can't saturate the disk together.
+    try:
+        async with _ZIP_SLOTS:
+            await asyncio.to_thread(_write_zip, tmp_path, files)
+    except Exception as exc:  # noqa: BLE001
+        tmp_path.unlink(missing_ok=True)
+        return JSONResponse({"error": f"Couldn't prepare the zip: {exc}"}, status_code=500)
+    return FileResponse(
+        str(tmp_path), media_type="application/zip", filename=zip_name,
+        background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
+    )
+
+
+_ZIP_SLOTS = asyncio.Semaphore(2)
+
+
+def _write_zip(path: Path, files: list[Path]) -> None:
     # Stored, not deflated: audio is already compressed, so deflating only costs time — and
     # through a Cloudflare tunnel the response must start within 100s or it's cut off.
     used: set[str] = set()
-    with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_STORED) as zf:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_STORED) as zf:
         for f in files:
             name = f.name
             if name in used:                       # same name from different folders
                 name = f"{f.parent.name} - {f.name}"
             used.add(name)
             zf.write(f, arcname=name)
-    return FileResponse(
-        tmp.name, media_type="application/zip", filename=zip_name,
-        background=BackgroundTask(lambda: Path(tmp.name).unlink(missing_ok=True)),
-    )
 
 
 @app.post("/api/open-folder")
@@ -801,6 +908,41 @@ async def open_folder():
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
     return {"ok": True, "path": path}
+
+
+# The code this process is running, fixed at startup. Recomputing it per request would read the
+# files on disk — so after an update the old process would claim to be the new code, and a
+# relaunch would keep reusing it.
+STARTED_BUILD = instance.build_id()
+
+
+@app.get("/api/instance")
+async def instance_info():
+    """Who is listening on this port — so a second launch can recognise OmniDL instead of
+    killing whatever holds the port."""
+    return {"app": instance.APP_ID, "pid": os.getpid(), "build": STARTED_BUILD,
+            "active": sum(1 for job in list(manager.jobs.values()) if job.status in ("running", "queued"))}
+
+
+@app.post("/api/instance/shutdown")
+async def instance_shutdown(request: Request):
+    """Stop cleanly so a relaunch can start the latest code: downloads are cancelled properly
+    (their partial files cleaned up) rather than the process being killed mid-write.
+
+    Only from the PC itself — never through the tunnel, and never on a hosted server.
+    """
+    peer = request.client.host if request.client else ""
+    if (not settings_mod.LOCAL_MODE or peer not in ("127.0.0.1", "::1")
+            or remote_access.came_through_cloudflare(request.headers)):
+        return JSONResponse({"error": "not allowed"}, status_code=403)
+    for job in list(manager.jobs.values()):
+        if job.status in ("running", "queued"):
+            await manager.cancel(job.id, _sid(request))
+    manager._persist()
+    # After this response is sent: uvicorn treats SIGINT as "shut down gracefully", which also
+    # runs the app's shutdown (stopping the tunnel and the keep-awake hold).
+    asyncio.get_running_loop().call_later(0.5, signal.raise_signal, signal.SIGINT)
+    return {"ok": True}
 
 
 @app.post("/api/maintenance/update-ytdlp")

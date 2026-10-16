@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -72,7 +74,7 @@ POT_PROVIDER_URL = os.environ.get("OMNIDL_POT_PROVIDER_URL", "").strip()
 SESSION_PREF_KEYS = {
     "audio_format", "video_container", "bitrate", "concurrency",
     "prefer_ytmusic", "spotify_match_duration", "sponsorblock", "skip_existing",
-    "naming_order", "naming_artists",
+    "naming_order", "naming_artists", "strict_matching",
 }
 # Never send these back to a browser.
 _SECRET_KEYS = {"spotify_client_id", "spotify_client_secret", "cookie_file"}
@@ -90,6 +92,24 @@ VIDEO_QUALITIES = ["Best", "2160p", "1440p", "1080p", "720p", "480p", "360p"]
 # odd/unusual codecs (it can hold almost anything without re-encoding).
 VIDEO_CONTAINERS = ["mp4", "mkv"]
 BROWSERS = ["none", "chrome", "firefox", "edge", "brave", "chromium", "opera", "vivaldi"]
+# Bitrate used whenever audio has to be converted (always for MP3; M4A/Ogg/Opus only when the
+# source is another codec). "auto" = 192 kbps. Lossless formats and copied streams ignore it.
+BITRATES = ["auto", "128k", "160k", "192k", "256k", "320k"]
+_BITRATE_RE = re.compile(r"^\s*(\d{2,3})\s*k?\s*$", re.IGNORECASE)
+
+
+def bitrate_kbps(value: Any) -> int:
+    """The kbps a Bitrate setting asks for, or 0 for "auto"/anything unusable."""
+    match = _BITRATE_RE.match(str(value or ""))
+    if not match:
+        return 0
+    kbps = int(match.group(1))
+    return kbps if 32 <= kbps <= 320 else 0
+
+
+def _coerce_bitrate(value: Any) -> str:
+    kbps = bitrate_kbps(value)
+    return f"{kbps}k" if kbps else "auto"
 
 # How downloaded files are named. This is a compatibility setting, not a cosmetic one:
 # a library built as "Artist - Title" gains a silent duplicate for every track saved as
@@ -106,7 +126,7 @@ DEFAULTS: dict[str, Any] = {
     # opus is YouTube's native audio codec -> remuxed without re-encoding: ~half the size
     # of a 320k mp3 at full source quality. mp3/m4a/flac still selectable in Settings.
     "audio_format": "opus",
-    "bitrate": "320k",
+    "bitrate": "auto",
     # Download mode for YouTube / pasted links: "audio" (extract audio) or "video"
     # (full video, merged to mp4). Spotify & SoundCloud always download audio.
     "media_type": "audio",
@@ -140,9 +160,22 @@ DEFAULTS: dict[str, Any] = {
     "sponsorblock": False,
     # Skip tracks already present in the output folder (resume playlists).
     "skip_existing": True,
+    # Download only matches verified as this exact song and version. Off = also take the best
+    # unverified match (saved and flagged for review). On 120 real songs, every wrong version
+    # that got through was one of those unverified picks.
+    "strict_matching": True,
 }
 
-BOOL_KEYS = {"prefer_ytmusic", "spotify_match_duration", "sponsorblock", "skip_existing"}
+BOOL_KEYS = {"prefer_ytmusic", "spotify_match_duration", "sponsorblock", "skip_existing",
+             "strict_matching"}
+
+
+class SettingsError(ValueError):
+    """A setting that can't be saved as given; `field` names the input to point at."""
+
+    def __init__(self, field: str, message: str):
+        super().__init__(message)
+        self.field = field
 
 
 def ensure_output_dir(path: str) -> None:
@@ -150,6 +183,52 @@ def ensure_output_dir(path: str) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
+
+
+def output_dir_problem(path: str) -> str:
+    """Why `path` can't be the download folder, or "" if it can (creating it if missing).
+
+    Settings used to accept anything here and swallow the error, so a typo saved fine and
+    every download then failed, while the library scan reported an empty "clean" library.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        return "Choose a folder for downloads."
+    folder = Path(os.path.expandvars(raw)).expanduser()
+    if not folder.is_absolute():
+        return "Use a full path, for example C:\\Users\\you\\Music."
+    if folder.exists() and not folder.is_dir():
+        return "That's a file, not a folder."
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except FileExistsError:
+        return "Part of that path is a file, not a folder."
+    except OSError as exc:
+        return f"Can't create that folder: {exc.strerror or exc}."
+    if not folder.is_dir():
+        return "That's a file, not a folder."
+    try:
+        handle, probe = tempfile.mkstemp(prefix=".omnidl-write-test-", dir=folder)
+        os.close(handle)
+        os.unlink(probe)
+    except OSError as exc:
+        return f"OmniDL can't write to that folder: {exc.strerror or exc}."
+    return ""
+
+
+def _write_config(data: dict) -> None:
+    """Replace config.json atomically: a crash mid-write must not leave a half-written file,
+    which would silently reset every setting (and the Spotify keys) to defaults."""
+    handle, tmp = tempfile.mkstemp(prefix=".config-", suffix=".json", dir=CONFIG_PATH.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as out:
+            out.write(json.dumps(data, indent=2))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, CONFIG_PATH)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def load_settings() -> dict:
@@ -170,7 +249,14 @@ def load_settings() -> dict:
 
 
 def save_settings(new: dict) -> dict:
+    """Validate and persist. Raises SettingsError, leaving config.json untouched, if a value
+    can't be used."""
     data = load_settings()
+    if isinstance(new.get("output_dir"), str) and new["output_dir"].strip() != data.get("output_dir"):
+        problem = output_dir_problem(new["output_dir"])
+        if problem:
+            raise SettingsError("output_dir", problem)
+        new = {**new, "output_dir": new["output_dir"].strip()}
     for key in DEFAULTS:
         if key in new and new[key] is not None:
             value = new[key]
@@ -186,11 +272,11 @@ def save_settings(new: dict) -> dict:
                     value = DEFAULTS["concurrency"]
             elif key in BOOL_KEYS:
                 value = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "yes", "on")
-            elif key in ("naming_order", "naming_artists"):
+            elif key in ("naming_order", "naming_artists", "bitrate", "audio_format",
+                         "video_container"):
                 value = _coerce_pref(key, value)
             data[key] = value
-    CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    ensure_output_dir(data["output_dir"])
+    _write_config(data)
     return data
 
 
@@ -212,6 +298,8 @@ def _coerce_pref(key: str, value: Any) -> Any:
         return value if value in NAMING_ORDERS else DEFAULTS["naming_order"]
     if key == "naming_artists":
         return value if value in NAMING_ARTISTS else DEFAULTS["naming_artists"]
+    if key == "bitrate":
+        return _coerce_bitrate(value)
     return value
 
 

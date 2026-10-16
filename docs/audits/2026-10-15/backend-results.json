@@ -1,0 +1,52 @@
+{
+  "launcherKillsUnverifiedListener": 424242,
+  "soundcloudOnlyFallback": {
+    "requiresUnlock": false,
+    "downloadTarget": "ytsearch1:unidentifiable phrase",
+    "usesConfiguredCookies": true,
+    "outcome": "downloaded_for_review"
+  },
+  "skippedRemoteFile": {
+    "outcome": "skipped",
+    "existingFile": true,
+    "hasFiles": false,
+    "fileCount": 0
+  },
+  "errorPartialFile": {
+    "fileCount": 1,
+    "hasFiles": false
+  },
+  "cancelledPartialFile": {
+    "fileCount": 1,
+    "hasFiles": false
+  },
+  "partialPlaylist": {
+    "status": "done",
+    "exitCode": 1,
+    "reviewCount": 1
+  },
+  "ignoredBitrate": [
+    {
+      "setting": "64k",
+      "commandQuality": "192K"
+    },
+    {
+      "setting": "320k",
+      "commandQuality": "192K"
+    }
+  ],
+  "soundcloudFormatsIgnored": true,
+  "titleArtistRepair": {
+    "artist": [
+      "Song"
+    ],
+    "title": [
+      "Artist"
+    ]
+  },
+  "invalidOutputAccepted": {
+    "configPersisted": true,
+    "outputExists": false,
+    "scanFiles": 0
+  }
+}

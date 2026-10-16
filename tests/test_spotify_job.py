@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.jobs import Job, JobManager
 from app.library import LibraryIndex, LibraryTrack
@@ -60,12 +60,35 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("downloaded", result.status)
 
-    async def test_plausible_nonexact_candidate_is_downloaded_and_marked_for_review(self):
+    async def test_plausible_nonexact_candidate_is_not_downloaded_with_strict_matching(self):
+        """Strict matching is the default: an unverified match goes to the review report, with
+        its link, instead of into the library."""
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = JobManager()
             job = Job(
                 "spotify:test", "spotify", None, "",
                 settings={"output_dir": temp_dir, "skip_existing": False, "audio_format": "opus"},
+            )
+            nonexact = Candidate(
+                "youtube", "https://youtube.test/x", "Midnight Run (Night Drive Session)", "Nova", 180,
+            )
+            run = AsyncMock(return_value=0)
+            with patch("app.jobs.candidate_search.search_all", return_value=[nonexact]),                  patch.object(manager, "_stream_subprocess", run):
+                result = await manager._fetch_track(job, Track("Nova", "Midnight Run", 180), job.settings, False, 1, 1)
+
+        run.assert_not_awaited()
+        self.assertEqual("download_failed", result.status)
+        self.assertIn("no verified match", result.reason)
+        self.assertEqual("https://youtube.test/x", result.candidates[0].candidate.url)
+        self.assertEqual([], job.produced)
+
+    async def test_plausible_nonexact_candidate_is_downloaded_for_review_when_strict_is_off(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = JobManager()
+            job = Job(
+                "spotify:test", "spotify", None, "",
+                settings={"output_dir": temp_dir, "skip_existing": False, "audio_format": "opus",
+                          "strict_matching": False},
             )
             # Same song and length, but extra title words that are neither a credit nor a
             # version keep it below the verified bar.

@@ -52,6 +52,16 @@ _HISTORY_OUTPUT_CAP = 12_000
 _OUTPUT_CAP = 200_000
 
 _AUDIO_SUFFIXES = {".opus", ".m4a", ".mp3", ".flac", ".wav", ".ogg", ".aac", ".webm", ".mp4", ".mkv"}
+# yt-dlp's working files: "x.f251.webm" format pieces awaiting a merge, "x.temp.opus" and
+# "x.orig.webm" mid-conversion (".part"/".ytdl" already fail the suffix test). A cancelled or
+# failed job can leave them behind; none of them is a finished song.
+_INTERMEDIATE_STEM_RE = re.compile(r"\.(?:part|ytdl|temp|orig|f\d+)$", re.IGNORECASE)
+
+
+def _deliverable(path: str | Path) -> bool:
+    """A finished media file that Save may hand over (not a log, report or half-written file)."""
+    name = PurePosixPath(str(path).replace("\\", "/"))
+    return name.suffix.lower() in _AUDIO_SUFFIXES and not _INTERMEDIATE_STEM_RE.search(name.stem)
 
 
 def _produced_list_path(job_id: str) -> Path:
@@ -282,6 +292,11 @@ class Job:
         self.started: float | None = None
         self.finished: float | None = None
         self.output = ""
+        # Characters ever appended to `output` (which is trimmed from the front). Live output
+        # carries it as "end", so a browser loading a log can tell which live lines the
+        # snapshot already contains — without it, switching jobs mid-download lost or
+        # repeated lines.
+        self.appended = 0
         self.progress: int | None = None
         self.label = ""
         self.procs: set[asyncio.subprocess.Process] = set()  # live subprocesses
@@ -294,35 +309,49 @@ class Job:
         self.review_count = 0
         # One line on why a job failed, shown on its card without opening the log.
         self.note = ""
+        # How a track list went, track by track: {"downloaded", "review", "skipped", "failed",
+        # "total"}. A playlist with one saved song and nine misses is "done", but it isn't
+        # finished business — the card says so and offers to retry just the misses.
+        self.counts: dict[str, int] | None = None
+        self.failed_tracks: list = []
 
     def append(self, text: str) -> None:
+        self.appended += len(text)
         self.output += text
         if len(self.output) > _OUTPUT_CAP:
             self.output = self.output[-_OUTPUT_CAP:]
 
     def list_files(self) -> list[Path]:
-        """Files this job produced, available to download (newest run only)."""
+        """Finished files this job produced or found already saved, available to download."""
         if self.out_dir is None:
             seen, files = set(), []
             for raw in self.produced:
                 path = Path(raw)
-                if raw not in seen and path.is_file():
+                if raw not in seen and _deliverable(raw) and path.is_file():
                     seen.add(raw)
                     files.append(path)
             return files
         if not self.out_dir.exists():
             return []
-        return sorted(p for p in self.out_dir.iterdir() if p.is_file())
+        return sorted(p for p in self.out_dir.iterdir() if p.is_file() and _deliverable(p))
 
-    def has_files(self) -> bool:
+    def _recorded(self) -> list[str]:
         # Local mode answers from the record rather than the disk: this runs for every job in
         # every snapshot, and a 500-track list would otherwise stat 500 files each time.
+        return list(dict.fromkeys(raw for raw in self.produced if _deliverable(raw)))
+
+    def file_names(self) -> list[str]:
         if self.out_dir is None:
-            return bool(self.produced)
-        return bool(self.list_files())
+            return self._recorded()
+        return [str(p) for p in self.list_files()]
+
+    def has_files(self) -> bool:
+        return bool(self.file_names())
 
     def to_dict(self) -> dict:
         meta = engines.ENGINES.get(self.engine, {"label": self.engine, "tool": self.engine})
+        finished = self.status in ("done", "error", "cancelled")
+        names = self.file_names() if finished else []
         return {
             "id": self.id,
             "input": self.input,
@@ -343,7 +372,19 @@ class Job:
             "media_type": self.settings.get("media_type", "audio"),
             "video_quality": self.settings.get("video_quality"),
             "audio_format": self.settings.get("audio_format"),
-            "has_files": self.status == "done" and self.has_files(),
+            # Whatever finished is deliverable, even from a run that failed or was cancelled
+            # part-way: those songs are on disk and the other device should be able to get them.
+            "has_files": finished and bool(names),
+            "file_count": len(names) if finished else 0,
+            # What the files actually are (".opus", ".mp3"...), not what was asked for: SoundCloud
+            # links, for one, can't be converted to every format.
+            "formats": sorted({PurePosixPath(n.replace("\\", "/")).suffix.lower().lstrip(".") for n in names}),
+            "counts": self.counts,
+            "can_retry_failed": finished and bool(self.failed_tracks),
+            "list_name": self.list_name,
+            # Hosted copies are deleted after FILE_TTL_SECONDS; the card counts down to it.
+            "expires": (self.finished + FILE_TTL_SECONDS
+                        if self.out_dir is not None and self.finished else None),
             "review_count": self.review_count,
             "has_report": bool(self.report_path) and Path(self.report_path).is_file(),
             "note": self.note,
@@ -362,6 +403,8 @@ class Job:
                          if self.tracks is not None else None)
         rec["session"] = self.session
         rec["produced"] = list(self.produced)
+        rec["failed_tracks"] = [{"artist": t.artist, "title": t.title, "artists": list(t.artists),
+                                 "duration": t.duration} for t in self.failed_tracks]
         rec["report_path"] = self.report_path
         rec["out_dir"] = str(self.out_dir) if self.out_dir else None
         return rec
@@ -387,6 +430,7 @@ class Job:
         if status in ("running", "queued"):  # never finished — server had stopped
             status = "cancelled"
             job.output += "\r\n\x1b[33m[interrupted — server was restarted]\x1b[0m\r\n"
+        job.appended = len(job.output)
         job.status = status
         job.code = rec.get("code")
         job.created = rec.get("created", time.time())
@@ -398,6 +442,12 @@ class Job:
         job.report_path = rec.get("report_path")
         job.review_count = int(rec.get("review_count") or 0)
         job.note = rec.get("note") or ""
+        counts = rec.get("counts")
+        job.counts = ({k: int(v or 0) for k, v in counts.items()} if isinstance(counts, dict) else None)
+        job.failed_tracks = [Track(artist=t.get("artist", ""), title=t.get("title", ""),
+                                   artists=list(t.get("artists") or []),
+                                   duration=int(t.get("duration") or 0))
+                             for t in rec.get("failed_tracks") or [] if isinstance(t, dict)]
         # Keep the mode fields so a retry from history still reproduces the original job.
         job.settings = {
             "media_type": rec.get("media_type", "audio"),
@@ -484,6 +534,7 @@ class JobManager:
             "jobs": [j.to_dict() for j in jobs],
             "active_id": active.id if active else None,
             "output": active.output if active else "",
+            "end": active.appended if active else 0,
         }
 
     # ----- rate limiting -------------------------------------------------
@@ -578,7 +629,8 @@ class JobManager:
         job.display_cmd = f"match {count} on {_SERVICE_NAMES[s['bulk_service']]}"
         return await self._enqueue(job, session, ip)
 
-    async def retry(self, job_id: str, session: str, settings_dict: dict, ip: str = "") -> Job | str:
+    async def retry(self, job_id: str, session: str, settings_dict: dict, ip: str = "",
+                    failed_only: bool = False) -> Job | str:
         """Re-run a job exactly as it was asked for. Returns the new job, or an error message.
 
         Mode (audio/video, format, quality, search service) comes from the original job, not
@@ -592,6 +644,15 @@ class JobManager:
         for field in ("media_type", "video_quality", "audio_format"):
             if old.settings.get(field):
                 s[field] = old.settings[field]
+        if failed_only:
+            if not old.failed_tracks:
+                return "Nothing failed in that job."
+            name = old.list_name or old.input
+            count = len(old.failed_tracks)
+            return await self.submit_bulk(
+                list(old.failed_tracks), s, session,
+                service=old.settings.get("bulk_service") or "auto",
+                list_name=f"{name} - {count} failed track{'s' if count != 1 else ''}", ip=ip)
         if old.kind in ("bulk", "search"):
             if not old.tracks:
                 return ("This list was saved before OmniDL kept lists with their jobs, so it "
@@ -709,7 +770,7 @@ class JobManager:
 
     async def _emit(self, job: Job, text: str) -> None:
         job.append(text)
-        await self._send(job, {"type": "output", "job_id": job.id, "data": text})
+        await self._send(job, {"type": "output", "job_id": job.id, "data": text, "end": job.appended})
         if self._update_progress(job, text):
             await self._send(job, {
                 "type": "progress", "job_id": job.id,
@@ -719,9 +780,11 @@ class JobManager:
     async def _emit_keyed(self, job: Job, key: str, text: str, store: bool = False) -> None:
         """Emit a line that updates in place on the client (one per concurrent track).
         Only the final state (store=True) is kept in the job log for reconnect replay."""
+        message = {"type": "output", "job_id": job.id, "data": text, "key": key}
         if store:
             job.append(text)
-        await self._send(job, {"type": "output", "job_id": job.id, "data": text, "key": key})
+            message["end"] = job.appended
+        await self._send(job, message)
 
     async def _key_done(self, job: Job, key: str) -> None:
         await self._send(job, {"type": "key_done", "job_id": job.id, "key": key})
@@ -873,6 +936,8 @@ class JobManager:
             resolved = await asyncio.to_thread(sr.resolve, job.spotify_url)
             tracks = resolved.tracks
             total = len(tracks)
+            job.list_name = resolved.name or job.list_name
+            await self._send(job, {"type": "status", "job": job.to_dict()})
             await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
         if resolved is not None and getattr(resolved, "truncated", False):
             # Spotify's embed tops out at 100 and its API refused the rest, so this is the
@@ -894,6 +959,7 @@ class JobManager:
             try:
                 settings["_library_index"] = await asyncio.to_thread(
                     build_library_index, Path(settings["output_dir"]),
+                    settings.get("naming_order", "artist-title"),
                 )
                 indexed = len(settings["_library_index"].tracks)
                 await self._emit(job, f"\x1b[2m   Indexed {indexed} existing audio file{'s' if indexed != 1 else ''}.\x1b[0m\r\n")
@@ -963,6 +1029,10 @@ class JobManager:
                 if outcome.status in ("downloaded_for_review", "no_candidate", "rejected", "download_failed"):
                     unresolved.append(outcome)
 
+            job.counts = {"downloaded": counts["ok"], "review": counts["review"],
+                          "skipped": counts["skip"], "failed": counts["fail"], "total": total}
+            job.failed_tracks = [tracks_by_index[i] for i, o in sorted(outcomes.items())
+                                 if o.status in ("no_candidate", "rejected", "download_failed")]
             report_path: Path | None = None
             if unresolved:
                 list_title = resolved.name if resolved is not None else (job.list_name or "Pasted list")
@@ -971,6 +1041,11 @@ class JobManager:
             job.progress = 100
             job.code = 0 if counts["fail"] == 0 else 1
             job.status = "done" if (counts["ok"] + counts["skip"]) > 0 or total == 0 else "error"
+            if job.status == "error" and unresolved:
+                # The card's one line: the real reason for a single song ("type it as
+                # 'Artist - Title'"), not the log's last line, which is the summary bar.
+                job.note = (unresolved[0].reason if total == 1 else
+                            f"none of the {total} tracks could be downloaded - see the review report")
             bar = "-" * 40
             report_suffix = f"\x1b[2m report={report_path}\x1b[0m" if report_path else ""
             # "Needs review" used to count failures, so a run where every track was saved for
@@ -1001,10 +1076,19 @@ class JobManager:
         shows ONE line per track that updates in place (search -> %, -> saved), so any
         number of concurrent tracks stay live and readable without interleaving.
         """
+        service = settings.get("bulk_service", "auto")
+        if service not in candidate_search.SERVICE_SOURCES:
+            service = "auto"
+        if not settings.get("_youtube_ok", True):
+            # Submitted by a visitor who hasn't unlocked YouTube: whatever the job says, only
+            # SoundCloud may be searched or downloaded for it.
+            service = "soundcloud"
         # A bare phrase ("drake one dance") has no artist to match on. Name the song first;
         # if nothing can be named it may not be a song at all, which is handled below.
+        # Naming uses YouTube Music, so a SoundCloud-only search never does it: that choice
+        # means YouTube isn't contacted at all (and its account isn't used).
         phrase = track.title if not track.artist else ""
-        if phrase:
+        if phrase and service != "soundcloud":
             named = await asyncio.to_thread(candidate_search.resolve_phrase, phrase)
             if named:
                 artists, title = named
@@ -1060,11 +1144,16 @@ class JobManager:
             await self._emit(job, f"\r\n{label}\r\n")
         if settings.get("skip_existing", True) and target.exists():
             await status("\x1b[33m\u23ed already downloaded\x1b[0m", store=True)
-            return await finish(TrackOutcome(track, "skipped", "output file already exists", []))
+            # Still this job's result: from another device, Save should hand it over rather
+            # than a re-run playlist finishing with nothing to save.
+            job.produced.append(str(target))
+            return await finish(TrackOutcome(track, "skipped", "output file already exists", [],
+                                             saved_as=target.name))
         if settings.get("skip_existing", True) and settings.get("_library_index") and track.artist:
             existing = settings["_library_index"].find(track.artist, track.title, track.duration)
             if existing is not None:
                 relative = existing.relative_path
+                job.produced.append(str(existing.path))
                 await status(f"\x1b[33m\u23ed already in library\x1b[0m \x1b[2m({relative})\x1b[0m", store=True)
                 return await finish(TrackOutcome(
                     track, "skipped", f"matching library file already exists: {relative}", [],
@@ -1072,28 +1161,22 @@ class JobManager:
 
         try:
             if phrase:
-                # Not identifiable as a song (a mix, a podcast, a vague phrase). Do what a
-                # YouTube search does — take its top result — but never call it verified,
-                # and keep the upload's own tags rather than inventing song metadata.
-                ok, why = await download(f"ytsearch1:{phrase}", "youtube", "top search result")
-                if job.status == "cancelled":
-                    return await finish(TrackOutcome(track, "cancelled", "job cancelled", []))
-                if not ok:
-                    await status(f"\x1b[31m\u2717 couldn't download ({why}); added to review\x1b[0m", store=True)
-                    return await finish(TrackOutcome(
-                        track, "download_failed", f"no song identified; search download failed ({why})", []))
-                await status(f"\x1b[33m\u26a0 saved for review\x1b[0m \x1b[2m{target.name} "
-                             f"(no song identified - YouTube's top result)\x1b[0m", store=True)
-                job.produced.append(str(target))
-                return await finish(TrackOutcome(
-                    track, "downloaded_for_review",
-                    "no song could be identified from this text, so YouTube's top result was saved",
-                    [], saved_as=target.name))
+                # Not identifiable as a song. This used to download YouTube's top result for
+                # the words, unverified — exactly how a music video, live cut or the wrong song
+                # gets saved. Nothing is downloaded on a guess now.
+                hint = ("SoundCloud-only searches need the artist: type it as 'Artist - Title'"
+                        if service == "soundcloud" else
+                        "couldn't tell which song this is: type it as 'Artist - Title', or paste a link")
+                await status(f"\x1b[33m\u26a0 {hint}\x1b[0m", store=True)
+                return await finish(TrackOutcome(track, "no_candidate", hint, []))
 
             await status("\x1b[2m\U0001f50e searching sources...\x1b[0m")
             candidates = await asyncio.to_thread(
-                candidate_search.search_all, track.artist, track.title,
-                settings.get("bulk_service", "auto"))
+                candidate_search.search_all, track.artist, track.title, service)
+            # Belt and braces for the source choice: never download from a service the user
+            # (or the access gate) excluded, whatever the search layer returned.
+            allowed = candidate_search.SERVICE_SOURCES[service]
+            candidates = [c for c in candidates if c.source in allowed]
             choice = choose(
                 track.artist, track.title, track.duration, candidates,
                 prefer_ytmusic=settings.get("prefer_ytmusic", True),
@@ -1109,9 +1192,13 @@ class JobManager:
             # under load the right version can fail and succeed a minute later, and taking
             # "the next plausible candidate" instead quietly saved a different edit that no
             # retry ever corrected. Failing here hands the track to the retry sweep instead.
-            reference = choice.eligible[0] if choice.eligible else None
-            stand_ins = [d for d in choice.eligible
-                         if d is reference or same_recording(d, reference)][:5]
+            # Strict matching (the default): only a verified match is ever downloaded. On 120
+            # real songs every remaining wrong pick was an unverified "plausible" one, so those
+            # now go to the review report — with their links — instead of into the library.
+            strict = settings.get("strict_matching", True)
+            pool = [d for d in choice.eligible if d.accepted] if strict else choice.eligible
+            reference = pool[0] if pool else None
+            stand_ins = [d for d in pool if d is reference or same_recording(d, reference)][:5]
             selected = None
             attempts: list[MatchDecision] = []
             last_error = ""
@@ -1137,6 +1224,10 @@ class JobManager:
                 if attempts:
                     msg = f"the right version wouldn't download ({last_error})"
                     reason = f"all candidate downloads failed ({last_error})"
+                elif strict and choice.eligible:
+                    msg = "no verified match - not downloaded, to avoid a wrong version"
+                    reason = ("no verified match: the closest candidates couldn't be confirmed as "
+                              "this exact version (strict matching)")
                 else:
                     msg = "no confident match found (skipped to avoid a wrong version)"
                     reason = "no confident match available"

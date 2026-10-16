@@ -44,6 +44,12 @@ def detect_engine(text: str, settings: dict) -> str:
 _YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "music.youtube.com")
 
 
+def is_youtube_url(text: str) -> bool:
+    """True for a youtube.com / youtu.be / music.youtube.com link."""
+    t = text.strip().lower()
+    return is_url(t) and any(h in t for h in _YOUTUBE_HOSTS)
+
+
 def needs_youtube_account(text: str) -> bool:
     """True if this input will be fetched from YouTube, and so consumes the operator's cookies.
 
@@ -105,8 +111,13 @@ def _spotify_cmd(text: str, s: dict) -> list[str]:
     return cmd
 
 
-def _ytdlp_common(s: dict) -> list[str]:
-    """yt-dlp args shared by the audio and video paths (JS runtime, cookies, SponsorBlock)."""
+def _ytdlp_common(s: dict, youtube: bool = True) -> list[str]:
+    """yt-dlp args shared by the audio and video paths (JS runtime, cookies, SponsorBlock).
+
+    `youtube` is False when the request goes to another site (a SoundCloud match, a direct
+    link). The operator's YouTube cookies and PO-token provider are then left out entirely:
+    a SoundCloud-only search must not use — or let yt-dlp rewrite — the YouTube login.
+    """
     cmd: list[str] = [
         "--retries", "5",
         "--extractor-retries", "3",
@@ -118,21 +129,33 @@ def _ytdlp_common(s: dict) -> list[str]:
         cmd += ["--js-runtimes", f"node:{node}"]
     cookie_file = s.get("cookie_file")
     browser = s.get("cookies_from_browser", "none")
-    if cookie_file:
+    if youtube and cookie_file:
         cmd += ["--cookies", cookie_file]
-    elif browser and browser != "none":
+    elif youtube and browser and browser != "none":
         cmd += ["--cookies-from-browser", browser]
     if s.get("sponsorblock"):
         cmd += ["--sponsorblock-remove", "music_offtopic"]
     if s.get("_produced_file"):
         # One line per final file — how a local job knows what it saved, for Save on another device.
         cmd += ["--print-to-file", "after_move:filepath", s["_produced_file"]]
-    if _settings.POT_PROVIDER_URL:
+    if youtube and _settings.POT_PROVIDER_URL:
         cmd += ["--extractor-args", f"youtubepot-bgutilhttp:base_url={_settings.POT_PROVIDER_URL}"]
     return cmd
 
 
-def _ytdlp_base(s: dict, out_template: str) -> list[str]:
+_LOSSY_FORMATS = {"mp3", "m4a", "ogg", "opus"}
+# Used when the Bitrate setting is "auto": transparent for music, without the unexpectedly
+# large files VBR-0 ("best") makes.
+_DEFAULT_BITRATE = "192K"
+
+
+def conversion_bitrate(s: dict) -> str:
+    """The bitrate yt-dlp converts lossy audio at, from the Bitrate setting ("320k" -> "320K")."""
+    kbps = _settings.bitrate_kbps(s.get("bitrate"))
+    return f"{kbps}K" if kbps else _DEFAULT_BITRATE
+
+
+def _ytdlp_base(s: dict, out_template: str, youtube: bool = True) -> list[str]:
     """Common yt-dlp args (audio extraction, metadata, cookies, JS runtime)."""
     cmd = [
         *_tool_cmd("yt-dlp"), "-x",
@@ -141,13 +164,14 @@ def _ytdlp_base(s: dict, out_template: str) -> list[str]:
         "--newline",
         "-o", out_template,
     ]
-    # MP3 needs an ffmpeg transcode. 192K preserves excellent music quality without the
-    # unexpectedly large files made by VBR-0 ("best"). Opus/m4a stay remuxed, not re-encoded.
-    if s["audio_format"] == "mp3":
-        cmd += ["--audio-quality", "192K"]
+    # The bitrate only matters when ffmpeg converts: MP3 always, M4A/Ogg/Opus when the source
+    # is a different codec. yt-dlp copies a stream that's already in the target codec (YouTube
+    # Opus -> .opus) without touching it, so this can't inflate or degrade those.
+    if s["audio_format"] in _LOSSY_FORMATS:
+        cmd += ["--audio-quality", conversion_bitrate(s)]
     if s["audio_format"] in _THUMBNAIL_OK:
         cmd.append("--embed-thumbnail")
-    return cmd + _ytdlp_common(s)
+    return cmd + _ytdlp_common(s, youtube)
 
 
 _VIDEO_HEIGHTS = {"2160p": 2160, "1440p": 1440, "1080p": 1080,
@@ -168,7 +192,7 @@ def _video_format_selector(quality: str, container: str) -> str:
     )
 
 
-def _ytdlp_video_base(s: dict, out_template: str) -> list[str]:
+def _ytdlp_video_base(s: dict, out_template: str, youtube: bool = True) -> list[str]:
     """yt-dlp args to download full video, merged to one container."""
     container = s.get("video_container") or "mp4"
     cmd = [
@@ -179,15 +203,16 @@ def _ytdlp_video_base(s: dict, out_template: str) -> list[str]:
         "--newline",
         "-o", out_template,
     ]
-    return cmd + _ytdlp_common(s)
+    return cmd + _ytdlp_common(s, youtube)
 
 
 def _youtube_cmd(text: str, s: dict) -> list[str]:
     out_template = str(Path(s["output_dir"]) / "%(title)s.%(ext)s")
+    youtube = not is_url(text) or is_youtube_url(text)
     if s.get("media_type") == "video":
-        cmd = _ytdlp_video_base(s, out_template)
+        cmd = _ytdlp_video_base(s, out_template, youtube)
     else:
-        cmd = _ytdlp_base(s, out_template)
+        cmd = _ytdlp_base(s, out_template, youtube)
     cmd.append(text if is_url(text) else f"ytsearch1:{text}")
     return cmd
 
@@ -200,33 +225,36 @@ def youtube_video_command(video_id: str, out_basename: str, s: dict) -> list[str
 def media_url_command(url: str, out_basename: str, s: dict) -> list[str]:
     """yt-dlp command to download one verified media URL with a Spotify-derived name."""
     out_template = str(Path(s["output_dir"]) / f"{out_basename}.%(ext)s")
-    cmd = _ytdlp_base(s, out_template)
+    cmd = _ytdlp_base(s, out_template, youtube=is_youtube_url(url))
     cmd += ["--no-playlist", url]
     return cmd
 
 
-def youtube_track_command(query: str, out_basename: str, s: dict,
-                          duration: int = 0) -> list[str]:
-    """yt-dlp command to fetch ONE track via search, named from Spotify metadata."""
-    out_template = str(Path(s["output_dir"]) / f"{out_basename}.%(ext)s")
-    cmd = _ytdlp_base(s, out_template)
-    if duration and duration > 0 and s.get("spotify_match_duration", True):
-        low = max(duration - 30, 0)
-        high = duration + 45
-        cmd += [
-            "--match-filter", f"duration >= {low} & duration <= {high}",
-            "--max-downloads", "1",
-            f"ytsearch5:{query}",
-        ]
-    else:
-        cmd += ["--no-playlist", f"ytsearch1:{query}"]
-    return cmd
+# What a SoundCloud link is saved as, per chosen format. SoundCloud serves MP3/Opus/AAC
+# streams plus, for some tracks, the uploader's original file. scdl can pick among those
+# but doesn't convert lossy audio into another format — which would only make a bigger file
+# of the same quality — so WAV/Ogg/M4A keep SoundCloud's own file (see soundcloud_format_note).
+_SOUNDCLOUD_FORMAT_ARGS = {
+    "mp3": ["--onlymp3"],
+    "opus": ["--opus", "--no-original"],
+    "flac": ["--flac"],        # lossless originals become FLAC; lossy uploads stay as they are
+}
+
+
+def soundcloud_format_note(audio_format: str) -> str:
+    """Plain-language caveat when a SoundCloud link can't be saved exactly as chosen."""
+    if audio_format in ("mp3", "opus"):
+        return ""
+    if audio_format == "flac":
+        return ("SoundCloud links: only lossless original uploads become FLAC; "
+                "everything else is saved in SoundCloud's own format.")
+    return (f"SoundCloud links aren't converted to {audio_format.upper()}: they're saved in "
+            "SoundCloud's own format (usually MP3 or Opus, or the original upload).")
 
 
 def _soundcloud_cmd(text: str, s: dict) -> list[str]:
     cmd = [*_tool_cmd("scdl"), "-l", text, "--path", s["output_dir"], "-c", "--addtofile"]
-    if s["audio_format"] == "mp3":
-        cmd.append("--onlymp3")
+    cmd += _SOUNDCLOUD_FORMAT_ARGS.get(s["audio_format"], [])
     return cmd
 
 

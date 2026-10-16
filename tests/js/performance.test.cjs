@@ -40,6 +40,20 @@ test("dashboard controls bind before metadata loads and requests start together"
   ]);
 });
 
+test("a failed startup request reports the error instead of applying half-loaded data", async () => {
+  const { startDashboard } = require(path.join(projectRoot, "app", "static", "js", "startup.js"));
+  const events = [];
+  const result = await startDashboard({
+    bind() { events.push("bind"); },
+    loadMeta: async () => { throw new Error("HTTP 500"); },
+    loadSettings: async () => ({ audio_format: "opus" }),
+    hydrate() { events.push("hydrate"); },
+    onError(error) { events.push(["error", error.message]); },
+  });
+  assert.equal(result.ok, false);
+  assert.deepEqual(events, ["bind", ["error", "HTTP 500"]]);
+});
+
 function runBackground({ reduceMotion }) {
   const source = fs.readFileSync(
     path.join(projectRoot, "app", "static", "js", "bg.js"),

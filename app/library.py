@@ -27,14 +27,69 @@ def _normalise(value: str) -> str:
     return _SPACE_RE.sub(" ", _NON_WORD_RE.sub(" ", value)).strip()
 
 
-def _filename_identity(path: Path) -> tuple[str, str] | None:
-    parts = path.stem.rsplit(" - ", 1)
-    if len(parts) != 2:
+class LibraryRootError(OSError):
+    """The library folder itself is missing or unusable — not the same as an empty library."""
+
+
+_SEPARATOR = " - "
+NAME_ORDERS = ("artist-title", "title-artist")
+
+
+def _name_halves(path: Path) -> tuple[str, str] | None:
+    """The two sides of "X - Y", or None unless the name has exactly one separator.
+
+    "Artist - Song - Live" can be read two ways, and the old last-separator split took
+    "Artist - Song" as the artist; guessing wrong writes the title into the artist tag.
+    """
+    parts = [part.strip() for part in path.stem.split(_SEPARATOR)]
+    if len(parts) != 2 or not all(parts):
         return None
-    artist, title = (part.strip() for part in parts)
-    if not artist or not title:
+    return parts[0], parts[1]
+
+
+def _filename_identity(path: Path, order: str = "artist-title") -> tuple[str, str] | None:
+    """(artist, title) from a filename named in `order`, or None if it can't be read safely."""
+    halves = _name_halves(path)
+    if halves is None:
         return None
-    return artist, title
+    first, second = halves
+    return (second, first) if order == "title-artist" else (first, second)
+
+
+def read_identity(path: Path, artist: str, title: str,
+                  order: str = "artist-title") -> tuple[str, str, str]:
+    """Artist and title for a file, from its tags first and its filename for what's missing.
+
+    Returns (artist, title, problem); `problem` explains why a missing value couldn't be read
+    from the name ("" when nothing is missing or it could). One rule for everything that
+    reads names — display, duplicate grouping, skip-existing, and tag repair — so the library
+    view never shows one reading while repair writes another.
+
+    When one tag is present and equals one half of the name, the other half is the missing
+    value whatever the naming order: the file says so itself. Otherwise the stated order
+    decides, so it must be the convention these files were actually saved with.
+    """
+    artist, title = (artist or "").strip(), (title or "").strip()
+    if artist and title:
+        return artist, title, ""
+    halves = _name_halves(path)
+    if halves is None:
+        reason = ("the filename isn't 'Artist - Title' or 'Title - Artist' with a single ' - ', "
+                  "so which part is the artist can't be told")
+        return artist, title, reason
+    first, second = halves
+    if artist and not title:
+        if _normalise(artist) == _normalise(first):
+            return artist, second, ""
+        if _normalise(artist) == _normalise(second):
+            return artist, first, ""
+    if title and not artist:
+        if _normalise(title) == _normalise(second):
+            return first, title, ""
+        if _normalise(title) == _normalise(first):
+            return second, title, ""
+    guess_artist, guess_title = (second, first) if order == "title-artist" else (first, second)
+    return artist or guess_artist, title or guess_title, ""
 
 
 def _first(tags, key: str) -> str:
@@ -84,6 +139,11 @@ class LibraryTrack:
     size: int
     has_artwork: bool
     issues: tuple[str, ...]
+    # How this library's untagged filenames are written ("artist-title" / "title-artist").
+    order: str = "artist-title"
+
+    def _read(self) -> tuple[str, str, str]:
+        return read_identity(Path(self.relative_path), self.artist, self.title, self.order)
 
     @property
     def raw_artist(self) -> str:
@@ -92,32 +152,32 @@ class LibraryTrack:
         `identity` normalises those separators away, so alias splitting has to start here
         or a multi-artist file can never be matched by its lead artist alone.
         """
-        fallback = _filename_identity(Path(self.relative_path))
-        return self.artist or (fallback[0] if fallback else "")
+        return self._read()[0]
 
     @property
     def identity(self) -> tuple[str, str] | None:
-        fallback = _filename_identity(Path(self.relative_path))
-        title = self.title or (fallback[1] if fallback else "")
-        key = (_normalise(self.raw_artist), _normalise(title))
+        artist, title, _problem = self._read()
+        key = (_normalise(artist), _normalise(title))
         return key if all(key) else None
 
     @property
     def repairable(self) -> bool:
+        # Repair always shows what it would write and lets you correct it, so a name it can't
+        # read is still fixable — you type the values instead.
         return bool(
-            _filename_identity(Path(self.relative_path))
-            and ("missing_artist" in self.issues or "missing_title" in self.issues)
+            ("missing_artist" in self.issues or "missing_title" in self.issues)
             and "unreadable" not in self.issues
         )
 
     def to_dict(self) -> dict:
+        artist, title, _problem = self._read()
         return {
             "path": self.relative_path,
             "title": self.title,
             "artist": self.artist,
             "album": self.album,
-            "display_title": self.title or (_filename_identity(Path(self.relative_path)) or ("", Path(self.relative_path).stem))[1],
-            "display_artist": self.artist or (_filename_identity(Path(self.relative_path)) or ("Unknown artist", ""))[0],
+            "display_title": title or Path(self.relative_path).stem,
+            "display_artist": artist or "Unknown artist",
             "duration": round(self.duration, 1),
             "bitrate": self.bitrate,
             "sample_rate": self.sample_rate,
@@ -214,6 +274,14 @@ class LibraryIndex:
             # "/" and "," separators, so splitting it would only ever yield one name.
             for alias in set(_artist_aliases(item.raw_artist)) | {artist}:
                 self._by_identity.setdefault((alias, title), []).append(item)
+            # A file with no tags at all may have been named by some other tool in the other
+            # order. Recognising it either way only prevents a duplicate download; nothing is
+            # written from this reading.
+            halves = None if (item.artist or item.title) else _name_halves(Path(item.relative_path))
+            if halves:
+                other_artist, other_title = (halves[1], halves[0]) if item.order != "title-artist" else halves
+                for alias in _artist_aliases(other_artist):
+                    self._by_identity.setdefault((alias, _normalise(other_title)), []).append(item)
 
     def find(self, artist: str, title: str, duration: int = 0) -> LibraryTrack | None:
         key_title = _normalise(title)
@@ -232,7 +300,7 @@ class LibraryIndex:
         return _best_track(matches) if matches else None
 
 
-def inspect_audio_file(path: Path, root: Path) -> LibraryTrack:
+def inspect_audio_file(path: Path, root: Path, order: str = "artist-title") -> LibraryTrack:
     from mutagen import File
 
     relative = path.relative_to(root).as_posix()
@@ -285,6 +353,7 @@ def inspect_audio_file(path: Path, root: Path) -> LibraryTrack:
         size=path.stat().st_size,
         has_artwork=artwork,
         issues=tuple(issues),
+        order=order if order in NAME_ORDERS else "artist-title",
     )
 
 
@@ -297,14 +366,20 @@ def _audio_paths(root: Path) -> list[Path]:
     )
 
 
-def build_library_index(root: Path) -> LibraryIndex:
+def build_library_index(root: Path, order: str = "artist-title") -> LibraryIndex:
     root = root.resolve()
-    return LibraryIndex(inspect_audio_file(path, root) for path in _audio_paths(root))
+    return LibraryIndex(inspect_audio_file(path, root, order) for path in _audio_paths(root))
 
 
-def scan_library(root: Path) -> dict:
+def scan_library(root: Path, order: str = "artist-title") -> dict:
+    """Inspect every audio file under `root`. Raises LibraryRootError if `root` itself is
+    missing or not a folder: that used to scan as an empty — "clean" — library."""
+    if not root.exists():
+        raise LibraryRootError(f"The library folder doesn't exist: {root}. Check Output folder in Settings.")
+    if not root.is_dir():
+        raise LibraryRootError(f"The library path is a file, not a folder: {root}.")
     root = root.resolve()
-    tracks = [inspect_audio_file(path, root) for path in _audio_paths(root)]
+    tracks = [inspect_audio_file(path, root, order) for path in _audio_paths(root)]
     duplicate_groups = []
     duplicate_paths: set[str] = set()
     reclaimable = 0
@@ -314,8 +389,8 @@ def scan_library(root: Path) -> dict:
         reclaimable += sum(item.size for item in group if item != recommended)
         duplicate_groups.append({
             "id": f"duplicate-{number}",
-            "artist": recommended.artist or (_filename_identity(Path(recommended.relative_path)) or ("Unknown artist", ""))[0],
-            "title": recommended.title or (_filename_identity(Path(recommended.relative_path)) or ("", Path(recommended.relative_path).stem))[1],
+            "artist": recommended.to_dict()["display_artist"],
+            "title": recommended.to_dict()["display_title"],
             "recommended_path": recommended.relative_path,
             "reclaimable_size": sum(item.size for item in group if item != recommended),
             "files": [
@@ -326,6 +401,7 @@ def scan_library(root: Path) -> dict:
 
     return {
         "root": str(root),
+        "order": order,
         "summary": {
             "total_files": len(tracks),
             "total_size": sum(item.size for item in tracks),
@@ -348,30 +424,67 @@ def _contained_path(root: Path, relative_path: str) -> Path:
     return target
 
 
-def repair_missing_tags(root: Path, relative_path: str) -> dict:
-    """Fill only missing artist/title tags derived from `Artist - Title`; never overwrite."""
+def _current_tags(target: Path):
     from mutagen import File
-
-    target = _contained_path(root, relative_path)
-    if not target.is_file() or target.suffix.casefold() not in AUDIO_EXTENSIONS:
-        raise ValueError("audio file was not found")
-    parsed = _filename_identity(target)
-    if parsed is None:
-        raise ValueError("filename must use 'Artist - Title' for safe repair")
 
     audio = File(str(target), easy=True)
     if audio is None:
         raise ValueError("audio metadata is unreadable")
+    return audio, _first(audio.tags, "artist"), _first(audio.tags, "title")
+
+
+def _repair_target(root: Path, relative_path: str) -> Path:
+    target = _contained_path(root, relative_path)
+    if not target.is_file() or target.suffix.casefold() not in AUDIO_EXTENSIONS:
+        raise ValueError("audio file was not found")
+    return target
+
+
+def propose_tags(root: Path, relative_path: str, order: str = "artist-title") -> dict:
+    """What a repair would write, without writing it — shown to you to confirm or correct."""
+    target = _repair_target(root, relative_path)
+    _audio, artist, title = _current_tags(target)
+    read_artist, read_title, problem = read_identity(target, artist, title, order)
+    return {
+        "path": target.relative_to(root.resolve()).as_posix(),
+        "filename": target.name,
+        "order": order,
+        "current": {"artist": artist, "title": title},
+        # Only the missing fields; existing tags are never changed.
+        "proposed": {} if problem else {
+            key: value for key, value, have in (("artist", read_artist, artist), ("title", read_title, title))
+            if not have and value
+        },
+        "problem": problem,
+    }
+
+
+def repair_missing_tags(root: Path, relative_path: str, order: str = "artist-title",
+                        artist: str | None = None, title: str | None = None) -> dict:
+    """Fill only missing artist/title tags; never overwrite one that's there.
+
+    Values you confirmed (`artist`/`title`) are written as given. Without them the filename
+    is read in `order`, and a name that can't be read unambiguously is refused rather than
+    guessed — see read_identity.
+    """
+    target = _repair_target(root, relative_path)
+    audio, have_artist, have_title = _current_tags(target)
+    read_artist, read_title, problem = read_identity(target, have_artist, have_title, order)
+    wanted = {"artist": (artist or "").strip(), "title": (title or "").strip()}
+    for key, read in (("artist", read_artist), ("title", read_title)):
+        if not wanted[key] and not problem:
+            wanted[key] = read
+    missing = [key for key, have in (("artist", have_artist), ("title", have_title)) if not have]
+    if any(not wanted[key] for key in missing):
+        raise ValueError(f"Can't fill this automatically: {problem or 'no value given'}. "
+                         "Enter the artist and title (or rename it 'Artist - Title').")
     if audio.tags is None:
         audio.add_tags()
-    artist, title = parsed
     changed: list[str] = []
-    if not _first(audio.tags, "artist"):
-        audio["artist"] = [artist]
-        changed.append("artist")
-    if not _first(audio.tags, "title"):
-        audio["title"] = [title]
-        changed.append("title")
+    for key in missing:
+        audio[key] = [wanted[key]]
+        changed.append(key)
     if changed:
         audio.save()
-    return {"ok": True, "path": target.relative_to(root.resolve()).as_posix(), "changed": changed}
+    return {"ok": True, "path": target.relative_to(root.resolve()).as_posix(), "changed": changed,
+            "artist": have_artist or wanted["artist"], "title": have_title or wanted["title"]}

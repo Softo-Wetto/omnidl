@@ -1,6 +1,7 @@
 import unittest
 
 from app.matching import (Candidate, choose, clean_title, consensus_duration, decide_match,
+                          is_music_video, reference_duration,
                           same_recording, version_markers)
 
 
@@ -36,13 +37,14 @@ class MatchingTests(unittest.TestCase):
         self.assertFalse(decision.accepted)
         self.assertEqual("artist similarity below 80%", decision.reason)
 
-    def test_rejects_duration_over_twenty_seconds(self):
+    def test_rejects_duration_over_ten_seconds(self):
+        """20s let radio edits and alternate cuts through as the album track; 10s doesn't."""
         decision = decide_match(
-            "Nova", "Midnight Run", 180, candidate(duration=205),
+            "Nova", "Midnight Run", 180, candidate(duration=195),
         )
 
         self.assertFalse(decision.accepted)
-        self.assertEqual("duration differs by more than 20 seconds", decision.reason)
+        self.assertEqual("duration differs by more than 10 seconds", decision.reason)
 
     def test_unknown_duration_is_rejected_for_review(self):
         decision = decide_match(
@@ -145,9 +147,17 @@ class ConsensusTests(unittest.TestCase):
         self.assertNotIn(145, [d.candidate.duration for d in choice.eligible])
 
     def test_one_upload_agreeing_with_itself_is_not_a_consensus(self):
-        decisions = [decide_match("Drake", "One Dance", 0, c("youtube_music", "One Dance", "Drake", 227)),
+        decisions = [decide_match("Drake", "One Dance", 0, c("youtube", "Drake - One Dance", "Drake", 227)),
                      decide_match("Drake", "One Dance", 0, c("youtube", "Drake - One Dance", "X", 175))]
         self.assertEqual(0, consensus_duration(decisions))
+
+    def test_youtube_musics_own_entry_can_stand_alone_but_is_outvoted_by_agreeing_uploads(self):
+        official = c("youtube_music", "One Dance", "Drake", 227)
+        alone = [decide_match("Drake", "One Dance", 0, official)]
+        self.assertEqual(227, consensus_duration(alone))
+        crowd = alone + [decide_match("Drake", "One Dance", 0, c("youtube", "Drake - One Dance", "Drake", d))
+                         for d in (174, 174, 175, 173)]
+        self.assertEqual(174, consensus_duration(crowd))
 
     def test_previews_and_other_versions_do_not_vote(self):
         decisions = [decide_match("Nova", "Midnight Run", 0, cand) for cand in (
@@ -202,6 +212,41 @@ class StandInTests(unittest.TestCase):
         self.assertTrue(same_recording(self._d(186, False), self._d(180, False)))
         self.assertFalse(same_recording(self._d(145, False), self._d(180, False)))
         self.assertFalse(same_recording(self._d(0, False), self._d(180, False)))
+
+
+class WrongVersionTests(unittest.TestCase):
+    """The wrong-version hardening of 16 Oct 2026 (offline benchmark of 120 real songs)."""
+
+    def test_music_videos_are_recognised_unless_one_was_asked_for(self):
+        self.assertTrue(is_music_video("Drake - One Dance (Official Music Video)"))
+        self.assertTrue(is_music_video("Shakira - Waka Waka (Video Oficial)"))
+        self.assertFalse(is_music_video("One Dance"))
+        self.assertFalse(is_music_video("Song (Official Music Video)", "Song (Official Music Video)"))
+
+    def test_a_typed_song_skips_the_music_video_for_the_album_length(self):
+        choice = choose("Drake", "One Dance", 0, [
+            c("youtube", "Drake - One Dance (Official Music Video)", "Drake", 255),
+            c("youtube_music", "One Dance", "Drake", 174),
+            c("youtube", "Drake - One Dance (Lyrics)", "Lyric Channel", 175),
+        ])
+        self.assertEqual(174, choice.eligible[0].candidate.duration)
+        self.assertNotIn(255, [d.candidate.duration for d in choice.eligible])
+
+    def test_a_remastered_spotify_title_matches_the_plain_upload(self):
+        decision = decide_match("Queen", "Bohemian Rhapsody - Remastered 2011", 355,
+                                c("youtube_music", "Bohemian Rhapsody", "Queen", 355))
+        self.assertTrue(decision.accepted, decision.reason)
+
+    def test_the_artists_own_upload_sets_the_length_when_nothing_agrees(self):
+        decisions = [decide_match("Nova", "Midnight Run", 0, c("youtube", "Midnight Run", "Nova", 201)),
+                     decide_match("Nova", "Midnight Run", 0, c("youtube", "Nova - Midnight Run (sped up)", "Fan", 150))]
+        self.assertEqual((201, "the artist's upload"), reference_duration(decisions, "Nova", "Midnight Run"))
+
+    def test_the_duration_window_is_ten_seconds(self):
+        near = decide_match("Nova", "Midnight Run", 180, candidate(source="youtube_music", official=True, duration=189))
+        far = decide_match("Nova", "Midnight Run", 180, candidate(source="youtube_music", official=True, duration=191))
+        self.assertTrue(near.accepted, near.reason)
+        self.assertFalse(far.accepted)
 
 
 if __name__ == "__main__":
