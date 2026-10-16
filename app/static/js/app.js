@@ -1771,7 +1771,7 @@ function warnStaleYtdlp() {
   if (warnedStale || state.meta.ytdlp_age_days == null || state.meta.ytdlp_age_days <= 21) return;
   warnedStale = true;
   const how = !state.meta.local ? "The server updates daily — check the health report."
-    : state.meta.frozen ? "Rebuild the app with build_exe.bat to update it."
+    : state.meta.frozen ? "Rebuild the app with packaging\\build_exe.bat to update it."
     : "Settings → Maintenance → Update yt-dlp.";
   toast(`⚠ yt-dlp is ${state.meta.ytdlp_age_days} days old (${state.meta.ytdlp_version}). ` +
         `YouTube downloads may fail. ${how}`, "error", 15000);

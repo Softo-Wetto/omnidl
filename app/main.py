@@ -984,7 +984,7 @@ async def update_ytdlp():
         return JSONResponse({"error": "Only available on your own install."}, status_code=403)
     if engines.FROZEN:
         return JSONResponse({"error": "This app bundles its own yt-dlp — update it by rebuilding "
-                                      "with build_exe.bat."}, status_code=400)
+                                      "with packaging\\build_exe.bat."}, status_code=400)
     if any(job.status in ("running", "queued") for job in list(manager.jobs.values())):
         # A running download holds yt-dlp.exe open, and Windows won't let pip replace it.
         return JSONResponse({"error": "Wait for the current downloads to finish, then try again."},

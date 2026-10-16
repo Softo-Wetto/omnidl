@@ -54,16 +54,23 @@ This installs `fastapi`, `uvicorn`, `spotdl`, `yt-dlp`, and `scdl`.
 
 ## Run
 
-```bash
-python run.py
-```
+**Double-click `start.bat`.** That's the only file you ever run. It opens OmniDL in your
+browser at <http://127.0.0.1:8000> (local-only — not exposed to your network) and, if you've
+set up [remote access](#use-your-home-omnidl-from-anywhere-cloudflare-tunnel), connects that
+too. Keep its window open while you use OmniDL; close it to stop OmniDL. You can drag
+`start.bat` into RocketDock or pin it.
 
-…or just double-click **`start.bat`** on Windows. It serves on
-<http://127.0.0.1:8000> (local-only — not exposed to your network) and opens your browser.
+What the other files are, so there's no doubt:
+
+| File | What it is |
+|---|---|
+| **`start.bat`** | **The launcher. Run this.** |
+| `run.py` | The program `start.bat` starts. Servers (the VPS) run it directly; you don't need to. |
+| `packaging/` | Optional: building a standalone `OmniDL.exe` for a PC without Python. Not needed. |
 
 Launching it again is safe. If OmniDL is already running it just opens it; if it's idle and
 the code has been updated, it's shut down cleanly and restarted; if it's busy downloading it's
-left alone (`python run.py --restart` restarts it anyway, cancelling cleanly). If some
+left alone (`start.bat --restart` restarts it anyway, cancelling cleanly). If some
 *other* program is using the port, OmniDL says so and leaves it running — set
 `OMNIDL_PORT=8001` to use another port. A restart doesn't wait on dashboard tabs left open
 (here or on another device): they're told the server is restarting and reconnect by themselves.
@@ -380,15 +387,13 @@ overwrites audio files.
 
 ## Build a standalone app (no Python needed to run)
 
-To get a double-click `OmniDL.exe` that bundles spotDL, yt-dlp, and scdl (so it runs on a
-machine without Python installed):
+Optional — only for running OmniDL on a machine *without* Python. On your own PC, use
+`start.bat`. To get a double-click `OmniDL.exe` that bundles spotDL, yt-dlp, and scdl, run
+**`packaging\build_exe.bat`**.
 
-```bash
-build_exe.bat            # or:  python -m PyInstaller OmniDL.spec --noconfirm
-```
-
-The result is **`dist/OmniDL/OmniDL.exe`** (a folder bundle — ship the whole `OmniDL`
-folder). `config.json` and `downloads/` are created next to the exe on first run.
+The result is **`packaging/dist/OmniDL/OmniDL.exe`** (a folder bundle — ship the whole
+`OmniDL` folder). It has its own `config.json` and `downloads/`, created next to the exe on
+first run; rebuilding keeps them.
 
 **ffmpeg is still required** and must be on your PATH (or drop `ffmpeg.exe` into the
 `OmniDL` folder). The bundle does not include ffmpeg.

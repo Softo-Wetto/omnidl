@@ -1,6 +1,13 @@
 # PyInstaller spec for OmniDL — bundles the server + spotdl/yt-dlp/scdl into one app.
-# Build with:  pyinstaller OmniDL.spec   (output in dist/OmniDL/)
-from PyInstaller.utils.hooks import collect_all
+# Optional: you don't need this to use OmniDL (start.bat is how you run it). Build with
+# build_exe.bat in this folder; the app lands in packaging/dist/OmniDL/.
+import os
+import sys
+
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+ROOT = os.path.dirname(SPECPATH)        # the omnidl folder (this file lives in packaging/)
+sys.path.insert(0, ROOT)
 
 # Packages whose code AND data files we want fully bundled.
 _PACKAGES = [
@@ -11,7 +18,7 @@ _PACKAGES = [
     "spotipy", "pykakasi", "syncedlyrics",
 ]
 
-datas = [("app/static", "static")]
+datas = [(os.path.join(ROOT, "app", "static"), "static")]
 binaries = []
 hiddenimports = []
 
@@ -24,17 +31,13 @@ for pkg in _PACKAGES:
     except Exception as exc:  # a missing optional dep shouldn't kill the build
         print(f"[OmniDL.spec] skipping {pkg}: {exc}")
 
-# Our own application package.
-hiddenimports += [
-    "app", "app.main", "app.jobs", "app.engines", "app.settings",
-    "app.spotify_resolver", "app.ytmusic_match", "app.tagging",
-    "app.candidate_search", "app.matching", "app.review_report",
-]
+# Our own application package — every module, so a new one can't be left out of the build.
+hiddenimports += collect_submodules("app")
 
 
 a = Analysis(
-    ["omnidl_main.py"],
-    pathex=[],
+    [os.path.join(SPECPATH, "omnidl_main.py")],
+    pathex=[ROOT],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,

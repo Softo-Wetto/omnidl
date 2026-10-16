@@ -1,4 +1,8 @@
-﻿"""Launch OmniDL: starts a fresh local server and opens the browser."""
+﻿"""The OmniDL server. On your PC, don't run this directly — double-click start.bat, which runs it.
+
+Starts (or reuses) the local server and opens the browser. Servers run it as `python run.py`
+too (the VPS's systemd unit and maintenance scripts refer to it by this path, so it stays here).
+"""
 from __future__ import annotations
 
 import asyncio
