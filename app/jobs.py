@@ -12,10 +12,11 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from . import bulk_input, candidate_search, engines
-from .library import build_library_index
+from .library import STAGING_DIR, build_library_index, _normalise
 from .matching import MatchDecision, choose, same_recording
 from .review_report import TrackOutcome, write_review_report
 from . import settings as settings_mod
@@ -45,6 +46,7 @@ _DL_BACKOFF = 2.5                    # seconds, multiplied by the attempt number
 
 # Persisted job history (survives restarts).
 _HISTORY_PATH = PROJECT_ROOT / "history.json"
+_HISTORY_BACKUP = PROJECT_ROOT / "history.json.bak"
 _HISTORY_MAX = 100
 _HISTORY_OUTPUT_CAP = 12_000
 
@@ -62,6 +64,126 @@ def _deliverable(path: str | Path) -> bool:
     """A finished media file that Save may hand over (not a log, report or half-written file)."""
     name = PurePosixPath(str(path).replace("\\", "/"))
     return name.suffix.lower() in _AUDIO_SUFFIXES and not _INTERMEDIATE_STEM_RE.search(name.stem)
+
+
+# How long one search may take before it's treated as "didn't answer" (and retried at the end).
+_SEARCH_DEADLINE = 60
+
+# size, mtime -> seconds of audio (None = empty/unreadable), so a check costs one stat after the
+# first read.
+_MEDIA_CACHE: dict[str, tuple[int, int, float | None]] = {}
+
+
+def _media_length(path: Path) -> float | None:
+    """Seconds of audio in `path`, or None if it's empty or can't be read as audio."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if st.st_size == 0:
+        return None
+    key = os.path.normcase(str(path))
+    hit = _MEDIA_CACHE.get(key)
+    if hit and hit[:2] == (st.st_size, st.st_mtime_ns):
+        return hit[2]
+    length: float | None = None
+    try:
+        from mutagen import File
+        audio = File(str(path))
+        seconds = float(getattr(getattr(audio, "info", None), "length", 0) or 0) if audio is not None else 0.0
+        length = seconds if seconds > 0 else None
+    except Exception:  # noqa: BLE001 — anything mutagen can't parse is not usable audio
+        length = None
+    _MEDIA_CACHE[key] = (st.st_size, st.st_mtime_ns, length)
+    return length
+
+
+def _usable_media(path: Path, expected: int = 0) -> bool:
+    """Real, playable audio — not an empty file from a failed conversion, not a cut-off one.
+
+    An existing file used to count as "already downloaded" just by existing, so a 0-byte
+    leftover made every retry skip the song for good and Save hand out a broken file.
+    """
+    length = _media_length(path)
+    if length is None:
+        return False
+    return not (expected and length < expected * 0.5)
+
+
+def _inside(path: Path, root: Path) -> bool:
+    """`path` really is within `root` (no `..`, no link pointing elsewhere)."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except OSError:
+        return False
+
+
+def _finished_files_under(root: Path) -> list[Path]:
+    """Every finished media file anywhere under `root` — scdl puts playlist tracks in a
+    subfolder — skipping links, staging folders and anything that resolves outside it."""
+    found: list[Path] = []
+    try:
+        for dirpath, dirs, names in os.walk(root, followlinks=False):
+            dirs[:] = [d for d in dirs if d != STAGING_DIR and not os.path.islink(os.path.join(dirpath, d))]
+            for name in names:
+                path = Path(dirpath) / name
+                if path.is_symlink() or not _deliverable(path) or not _inside(path, root):
+                    continue
+                try:
+                    if path.stat().st_size > 0:
+                        found.append(path)
+                except OSError:
+                    pass
+    except OSError:
+        return []
+    return sorted(found)
+
+
+def _make_hidden_dir(path: Path) -> None:
+    """Create the staging folder, hidden on Windows (a leading dot only hides it elsewhere),
+    so it doesn't flash up in your music folder while a song downloads."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x02)   # FILE_ATTRIBUTE_HIDDEN
+    except (OSError, AttributeError):
+        pass
+
+
+class _OutputClaims:
+    """One writer per output file, across every track of every job.
+
+    Duplicate rows in one list, or the same song in two playlists running side by side, used
+    to both see "no file yet" and run converters onto the same name. A claim is held from the
+    existing-file check until the finished file is in place, so the second one waits and then
+    finds the first one's file.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, list] = {}           # key -> [lock, users]
+        self.written_by: dict[str, tuple[str, str]] = {}   # key -> identity of the track saved there
+
+    @staticmethod
+    def key(path: Path) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    @asynccontextmanager
+    async def claim(self, path: Path):
+        key = self.key(path)
+        entry = self._locks.setdefault(key, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield key
+        finally:
+            entry[1] -= 1
+            if entry[1] == 0:
+                self._locks.pop(key, None)
+
+
+def _identity(track) -> tuple[str, str]:
+    return _normalise(getattr(track, "all_artists", "") or track.artist), _normalise(track.title)
 
 
 def _produced_list_path(job_id: str) -> Path:
@@ -134,8 +256,12 @@ _SOURCE_NAMES = {"youtube_music": "YouTube Music", "youtube": "YouTube", "soundc
 
 
 def _tally(outcomes, total: int) -> dict[str, int]:
-    """Per-track results so far: what the card shows, live and at the end."""
-    counts = {"downloaded": 0, "review": 0, "skipped": 0, "failed": 0, "total": total}
+    """Per-track results so far: what the card shows, live and at the end.
+
+    "temporary" is the part of "failed" that hit a passing problem (a rate limit, a search that
+    didn't answer, a download that kept failing) rather than "not found" — worth retrying later.
+    """
+    counts = {"downloaded": 0, "review": 0, "skipped": 0, "failed": 0, "temporary": 0, "total": total}
     for outcome in outcomes:
         if outcome.status in ("downloaded", "downloaded_for_review"):
             counts["downloaded"] += 1
@@ -144,6 +270,7 @@ def _tally(outcomes, total: int) -> dict[str, int]:
             counts["skipped"] += 1
         else:
             counts["failed"] += 1
+            counts["temporary"] += _worth_retrying(outcome)
     return counts
 
 
@@ -342,9 +469,6 @@ class Job:
         self.failed_tracks: list = []
         # Set when Spotify wouldn't hand over the whole playlist (see spotify_resolver).
         self.incomplete_list = False
-        # Rate-limit back-off shared by every download in this job (not persisted).
-        self.pause_until = 0.0
-        self.rate_hits = 0
 
     def append(self, text: str) -> None:
         self.appended += len(text)
@@ -353,18 +477,32 @@ class Job:
             self.output = self.output[-_OUTPUT_CAP:]
 
     def list_files(self) -> list[Path]:
-        """Finished files this job produced or found already saved, available to download."""
-        if self.out_dir is None:
-            seen, files = set(), []
-            for raw in self.produced:
-                path = Path(raw)
-                if raw not in seen and _deliverable(raw) and path.is_file():
-                    seen.add(raw)
+        """Finished files this job produced or found already saved, available to download.
+
+        The job's own record (`produced` — the downloader's manifest, including files it
+        found already there) comes first. A hosted job without one falls back to walking its
+        own folder, subfolders included; nothing outside that folder is ever offered.
+        """
+        files: list[Path] = []
+        seen: set[str] = set()
+        for raw in self.produced:
+            path = Path(raw)
+            key = os.path.normcase(raw)
+            if key in seen or not _deliverable(raw):
+                continue
+            if self.out_dir is not None and not _inside(path, self.out_dir):
+                continue
+            try:
+                if path.is_file() and path.stat().st_size > 0:
+                    seen.add(key)
                     files.append(path)
+            except OSError:
+                pass
+        if files or self.out_dir is None:
             return files
         if not self.out_dir.exists():
             return []
-        return sorted(p for p in self.out_dir.iterdir() if p.is_file() and _deliverable(p))
+        return _finished_files_under(self.out_dir)
 
     def _recorded(self) -> list[str]:
         # Local mode answers from the record rather than the disk: this runs for every job in
@@ -463,11 +601,16 @@ class Job:
             status = "cancelled"
             job.output += "\r\n\x1b[33m[interrupted — server was restarted]\x1b[0m\r\n"
         job.appended = len(job.output)
+        interrupted = status != rec.get("status", "done")
         job.status = status
         job.code = rec.get("code")
         job.created = rec.get("created", time.time())
         job.started = rec.get("started")
         job.finished = rec.get("finished")
+        if interrupted and not job.finished:
+            # It never finished, so it had no finish time — and hosted cleanup only expires
+            # finished jobs, so its files were kept forever. The restart is when it ended.
+            job.finished = time.time()
         job.progress = rec.get("progress")
         job.label = rec.get("label", "")
         job.produced = [str(p) for p in rec.get("produced") or []]
@@ -501,6 +644,11 @@ class JobManager:
         self._cleanup_task: asyncio.Task | None = None
         self._submit_times: dict[str, list[float]] = {}  # session -> recent submit times
         self._ip_times: dict[str, list[float]] = {}      # client IP -> recent submit times
+        self._claims = _OutputClaims()
+        # YouTube rate limits are per connection/account, not per job: when one job is told to
+        # slow down, every job waits (was per job, so a second playlist kept hammering).
+        self.pause_until = 0.0
+        self.rate_hits = 0
 
     # ----- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -511,22 +659,51 @@ class JobManager:
 
     # ----- persistence ---------------------------------------------------
     def _load_history(self) -> None:
-        try:
-            if not _HISTORY_PATH.exists():
-                return
-            for rec in json.loads(_HISTORY_PATH.read_text(encoding="utf-8")):
-                job = Job.from_record(rec)
+        """Restore the queue and history. A damaged history.json (a crash mid-write before
+        writes were atomic, a full disk) falls back to the previous good copy."""
+        for path in (_HISTORY_PATH, _HISTORY_BACKUP):
+            try:
+                if not path.exists():
+                    continue
+                records = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(records, list):
+                    raise ValueError("not a list of jobs")
+            except (OSError, ValueError) as exc:
+                print(f"[OmniDL] Couldn't read {path.name} ({exc}); trying the backup.")
+                continue
+            for rec in records:
+                try:
+                    job = Job.from_record(rec)
+                except Exception as exc:  # noqa: BLE001 — one bad record mustn't lose the rest
+                    print(f"[OmniDL] Skipped an unreadable history entry: {exc}")
+                    continue
                 self.jobs[job.id] = job
                 self.order.append(job.id)
-        except Exception:
-            pass
+            if path is _HISTORY_BACKUP:
+                print("[OmniDL] Restored history from history.json.bak.")
+            return
 
     def _persist(self) -> None:
+        """Save history atomically, keeping the previous version as history.json.bak — a crash
+        or full disk mid-write used to leave a truncated file and lose the whole history."""
         try:
             recs = [self.jobs[i].to_record() for i in self.order[-_HISTORY_MAX:] if i in self.jobs]
-            _HISTORY_PATH.write_text(json.dumps(recs), encoding="utf-8")
-        except Exception:
-            pass
+            data = json.dumps(recs)
+            tmp = _HISTORY_PATH.with_name(_HISTORY_PATH.name + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            if _HISTORY_PATH.exists():
+                try:
+                    os.replace(_HISTORY_PATH, _HISTORY_BACKUP)
+                except OSError:
+                    pass
+            os.replace(tmp, _HISTORY_PATH)
+        except Exception as exc:  # noqa: BLE001 — never let saving history break a download
+            if not getattr(self, "_persist_warned", False):
+                self._persist_warned = True
+                print(f"[OmniDL] Couldn't save history.json: {exc}")
 
     # ----- websocket fan-out --------------------------------------------
     async def broadcast(self, message: dict, session: str | None = None) -> None:
@@ -728,9 +905,11 @@ class JobManager:
             job.kind = "spotify"
             job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
         else:
-            if job.out_dir is None and engine == "youtube":
-                # yt-dlp reports every file it ends up with (including ones it skipped as
-                # already downloaded), which is exact even with other jobs writing alongside.
+            if engine in ("youtube", "soundcloud"):
+                # A manifest of every file the job ends up with — including ones it found
+                # already there — written by yt-dlp (scdl runs yt-dlp inside, and passes the
+                # option through). Exact even with other jobs writing alongside, unlike
+                # comparing the folder before and after, which missed re-runs entirely.
                 s["_produced_file"] = str(_produced_list_path(job.id))
             job.argv = engines.build_command(engine, input_text, s)
             job.display_cmd = engines.describe_command(job.argv)
@@ -771,13 +950,42 @@ class JobManager:
         """Delete finished jobs' files once they age out, to bound disk use."""
         while True:
             await asyncio.sleep(300)
-            now = time.time()
-            for job in list(self.jobs.values()):
-                if job.status in ("done", "error", "cancelled") and job.finished \
-                        and now - job.finished > FILE_TTL_SECONDS:
-                    if job.out_dir and job.out_dir.exists():
-                        self._remove_files(job)
-                        await self._send(job, {"type": "status", "job": job.to_dict()})
+            await self._expire_files()
+
+    async def _expire_files(self, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        for job in list(self.jobs.values()):
+            if job.status in ("done", "error", "cancelled") and job.finished \
+                    and now - job.finished > FILE_TTL_SECONDS:
+                if job.out_dir and job.out_dir.exists():
+                    self._remove_files(job)
+                    await self._send(job, {"type": "status", "job": job.to_dict()})
+        self._reap_orphans(now)
+
+    def _reap_orphans(self, now: float) -> None:
+        """Hosted only: delete per-job folders no job refers to any more (history trimmed, a
+        crash before it was saved) once they're older than the file TTL. Never touches a local
+        install, where the output folder is the user's music library."""
+        if settings_mod.LOCAL_MODE or not DOWNLOAD_ROOT.is_dir():
+            return
+        known = {os.path.normcase(str(j.out_dir.resolve())) for j in self.jobs.values() if j.out_dir}
+        try:
+            sessions = [d for d in DOWNLOAD_ROOT.iterdir() if d.is_dir() and not d.is_symlink()]
+        except OSError:
+            return
+        for session_dir in sessions:
+            try:
+                job_dirs = [d for d in session_dir.iterdir() if d.is_dir() and not d.is_symlink()]
+            except OSError:
+                continue
+            for job_dir in job_dirs:
+                try:
+                    if (os.path.normcase(str(job_dir.resolve())) not in known
+                            and now - job_dir.stat().st_mtime > FILE_TTL_SECONDS
+                            and _inside(job_dir, DOWNLOAD_ROOT)):
+                        shutil.rmtree(job_dir, ignore_errors=True)
+                except OSError:
+                    pass
 
     # ----- internals -----------------------------------------------------
     def _kill(self, job: Job) -> None:
@@ -923,8 +1131,7 @@ class JobManager:
                 await self._emit(job, f"\r\n\x1b[1;36m$ {job.display_cmd}\x1b[0m\r\n")
                 before = _audio_snapshot(job) if job.out_dir is None else None
                 job.code = await self._stream_subprocess(job, job.argv)
-                if job.out_dir is None:
-                    job.produced.extend(_collect_produced(job, before))
+                job.produced.extend(_collect_produced(job, before))
                 if job.status != "cancelled":
                     job.status = "done" if job.code == 0 else "error"
                     if job.status == "done":
@@ -1006,18 +1213,25 @@ class JobManager:
 
         outcomes: dict[int, TrackOutcome] = {}
         tracks_by_index: dict[int, object] = {}
-        done = {"n": 0}
+        # Tracks that will get another go in a retry sweep: not finished business yet.
+        awaiting_retry: set[int] = set()
         lock = asyncio.Lock()
         sem = asyncio.Semaphore(concurrency)
         detailed = concurrency == 1
+        job.progress = 0
+
+        def advance() -> None:
+            # Progress = tracks with a final result. Starting a track used to set it from the
+            # track's position and finishing one from the count done, so with parallel
+            # downloads it jumped back and forth (0, 25, 50, 25, 75, 50...).
+            final = len(outcomes) - len(awaiting_retry & outcomes.keys())
+            job.progress = max(job.progress or 0, int(final / total * 100) if total else 100)
 
         async def handle(index: int, track) -> None:
             async with sem:
                 if job.status == "cancelled":
                     return
-                async with lock:
-                    job.label = track.query
-                    job.progress = int((index - 1) / total * 100) if total else 0
+                job.label = track.query
                 await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
                 outcome = await self._fetch_track(job, track, settings, detailed, index, total)
                 if outcome.status == "cancelled":
@@ -1025,8 +1239,9 @@ class JobManager:
                 async with lock:
                     outcomes[index] = outcome
                     tracks_by_index[index] = track
-                    done["n"] += 1
-                    job.progress = int(done["n"] / total * 100) if total else 100
+                    if _worth_retrying(outcome):
+                        awaiting_retry.add(index)
+                    advance()
                     job.label = track.query
                     # Live tally, so a 200-song playlist shows "57 saved · 2 not found" as it goes.
                     job.counts = _tally(outcomes.values(), total)
@@ -1039,23 +1254,32 @@ class JobManager:
         # answer, usually lost a transient YouTube-throttling roll during the burst. Re-try
         # them one at a time after the burst — then once more after a longer break — when
         # the throttling has eased. The correct song is usually there.
-        for sweep, (gap, breather) in enumerate(((4, 0), (8, 20)), start=1):
+        sweeps = ((4, 0), (8, 20))
+        for sweep, (gap, breather) in enumerate(sweeps, start=1):
             if job.status == "cancelled":
                 break
             retryable = [i for i, o in sorted(outcomes.items()) if _worth_retrying(o)]
             if not retryable:
                 break
+            last_sweep = sweep == len(sweeps)
             when = "" if sweep == 1 else " after a short break"
             await self._emit(job, f"\r\n\x1b[33m\u21bb retrying {len(retryable)} track(s) that hit a "
                                    f"temporary problem{when} \x1b[2m(one at a time)\x1b[0m\r\n")
+            job.label = f"Waiting to retry {len(retryable)} track{'s' if len(retryable) != 1 else ''}"
+            await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
             await self._sleep_unless_cancelled(job, breather)
-            for i in retryable:
+            for n, i in enumerate(retryable, start=1):
                 if job.status == "cancelled":
                     break
                 await self._sleep_unless_cancelled(job, gap)   # let the rate-limit window pass
+                job.label = f"Retrying {n}/{len(retryable)}: {tracks_by_index[i].query}"
+                await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
                 retry = await self._fetch_track(job, tracks_by_index[i], settings, True, i, total)
                 if retry.status != "cancelled":
                     outcomes[i] = retry
+                    if last_sweep or not _worth_retrying(retry):
+                        awaiting_retry.discard(i)
+                    advance()
                     job.counts = _tally(outcomes.values(), total)
                     await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress,
                                            "label": job.label, "counts": job.counts})
@@ -1096,18 +1320,22 @@ class JobManager:
             await asyncio.sleep(min(1.0, left))
 
     async def _wait_for_cooldown(self, job: Job) -> None:
-        """Hold a download while the job is backing off from a YouTube rate limit."""
-        left = job.pause_until - time.time()
+        """Hold a download while OmniDL is backing off from a YouTube rate limit."""
+        left = self.pause_until - time.time()
         if left > 0:
+            previous = job.label
+            job.label = f"Paused {int(left)}s - YouTube is rate-limiting"
+            await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress, "label": job.label})
             await self._sleep_unless_cancelled(job, left)
+            job.label = previous
 
     async def _rate_limited(self, job: Job) -> None:
-        """YouTube said "slow down": pause every download in this job, longer each time."""
-        job.rate_hits += 1
-        pause = min(30 * job.rate_hits, 180)
+        """YouTube said "slow down": pause every download in every job, longer each time."""
+        self.rate_hits += 1
+        pause = min(30 * self.rate_hits, 180)
         until = time.time() + pause
-        if until > job.pause_until + 1:
-            job.pause_until = until
+        if until > self.pause_until + 1:
+            self.pause_until = until
             await self._emit(job, f"\x1b[33m\u23f8 YouTube is rate-limiting this connection - pausing "
                                   f"downloads for {pause}s, then carrying on\x1b[0m\r\n")
 
@@ -1146,8 +1374,13 @@ class JobManager:
         # Naming uses YouTube Music, so a SoundCloud-only search never does it: that choice
         # means YouTube isn't contacted at all (and its account isn't used).
         phrase = track.title if not track.artist else ""
+        phrase_timed_out = False
         if phrase and service != "soundcloud":
-            named = await asyncio.to_thread(candidate_search.resolve_phrase, phrase)
+            try:
+                named = await asyncio.wait_for(
+                    asyncio.to_thread(candidate_search.resolve_phrase, phrase), _SEARCH_DEADLINE)
+            except asyncio.TimeoutError:
+                named, phrase_timed_out = None, True
             if named:
                 artists, title = named
                 track = Track(artist=artists[0], title=title, artists=artists)
@@ -1157,7 +1390,6 @@ class JobManager:
         ext = settings.get("audio_format", "opus")
         basename = track.filename_for(settings.get("naming_order", "artist-title"),
                                       settings.get("naming_artists", "all"))
-        target = out_dir / f"{basename}.{ext}"
         key = f"t{index}"
         shown = f"{track.artist} - {track.title}" if track.artist else track.title
         label = f"\x1b[1;36m[{index}/{total}]\x1b[0m \x1b[1m{shown}\x1b[0m"
@@ -1174,6 +1406,89 @@ class JobManager:
                 await self._key_done(job, key)
             return outcome
 
+        async def phase(text: str) -> None:
+            """What the card says this job is doing right now."""
+            job.label = f"{text}: {shown}"
+            await self._send(job, {"type": "progress", "job_id": job.id, "progress": job.progress,
+                                   "label": job.label})
+
+        if detailed:
+            await self._emit(job, f"\r\n{label}\r\n")
+
+        identity = _identity(track)
+        attempt_name = 1
+        while True:
+            name = basename if attempt_name == 1 else f"{basename} ({attempt_name})"
+            target = out_dir / f"{name}.{ext}"
+            # One writer per output file across every job (see _OutputClaims). Held until the
+            # finished file is in place, so a duplicate row or the same song in another
+            # playlist waits here and then finds this one's file.
+            async with self._claims.claim(target) as claim_key:
+                owner = self._claims.written_by.get(claim_key)
+                if owner is None or owner == identity or attempt_name >= 20:
+                    return await self._fetch_claimed(
+                        job, track, settings, detailed, index, out_dir, ext, name, target, claim_key,
+                        identity, phrase, phrase_timed_out, service, status, finish, phase)
+            # A different song already saved under this name in this run (two names that
+            # sanitise or truncate to the same thing): this one gets "(2)" instead of being
+            # "skipped" as if it were the same song.
+            attempt_name += 1
+
+    async def _fetch_claimed(self, job: Job, track, settings: dict, detailed: bool, index: int,
+                             out_dir: Path, ext: str, basename: str, target: Path, claim_key: str,
+                             identity: tuple[str, str], phrase: str, phrase_timed_out: bool,
+                             service: str, status, finish, phase) -> TrackOutcome:
+        """The rest of _fetch_track, run while this track holds the claim on `target`."""
+        skip = settings.get("skip_existing", True)
+        broken: Path | None = None
+        if target.exists():
+            if not skip:
+                pass                                   # replaced by the fresh download below
+            elif _usable_media(target, track.duration):
+                await status("\x1b[33m\u23ed already downloaded\x1b[0m", store=True)
+                # Still this job's result: from another device, Save should hand it over rather
+                # than a re-run playlist finishing with nothing to save.
+                job.produced.append(str(target))
+                self._claims.written_by.setdefault(claim_key, identity)
+                return await finish(TrackOutcome(track, "skipped", "output file already exists", [],
+                                                 saved_as=target.name))
+            else:
+                broken = target
+                await status("\x1b[33m\u26a0 the existing file is empty or unreadable - "
+                             "downloading a fresh copy\x1b[0m", store=True)
+        if skip and broken is None and settings.get("_library_index") and track.artist:
+            existing = settings["_library_index"].find(track.artist, track.title, track.duration)
+            if existing is not None:
+                relative = existing.relative_path
+                job.produced.append(str(existing.path))
+                await status(f"\x1b[33m\u23ed already in library\x1b[0m \x1b[2m({relative})\x1b[0m", store=True)
+                return await finish(TrackOutcome(
+                    track, "skipped", f"matching library file already exists: {relative}", [],
+                ))
+
+        if phrase:
+            if phrase_timed_out:
+                msg = "YouTube Music didn't answer while naming this song - will retry at the end"
+                await status(f"\x1b[33m\u26a0 {msg}\x1b[0m", store=True)
+                return await finish(TrackOutcome(track, "no_candidate", f"search failed: {msg}", [],
+                                                 retryable=True))
+            # Not identifiable as a song. This used to download YouTube's top result for
+            # the words, unverified — exactly how a music video, live cut or the wrong song
+            # gets saved. Nothing is downloaded on a guess now.
+            hint = ("SoundCloud-only searches need the artist: type it as 'Artist - Title'"
+                    if service == "soundcloud" else
+                    "couldn't tell which song this is: type it as 'Artist - Title', or paste a link")
+            await status(f"\x1b[33m\u26a0 {hint}\x1b[0m", store=True)
+            return await finish(TrackOutcome(track, "no_candidate", hint, []))
+
+        # Downloads land in a folder of their own and only move to their real name once
+        # complete, so nothing half-written or mid-conversion ever sits at the final path, and
+        # cleaning up a failed attempt can't touch another track's files.
+        stage = out_dir / STAGING_DIR / f"{job.id}-{index}"
+        staged = stage / f"{basename}.{ext}"
+        stage_settings = {**settings, "output_dir": str(stage)}
+        _make_hidden_dir(stage.parent)
+
         async def download(url: str, source: str, what: str) -> tuple[bool, str]:
             """Fetch one URL, retrying the same candidate. Returns (ok, last error)."""
             async def progress(info: str) -> None:
@@ -1188,15 +1503,21 @@ class JobManager:
                     return False, "cancelled"
                 suffix = "" if attempt == 1 else f" \x1b[2m(retry {attempt - 1})\x1b[0m"
                 await status(f"\x1b[2m\u2192 trying {source} ({what}){suffix}...\x1b[0m")
+                await phase("Downloading")
                 errors: list[str] = []
                 code = await self._stream_subprocess(
-                    job, engines.media_url_command(url, basename, settings),
+                    job, engines.media_url_command(url, basename, stage_settings),
                     emit=detailed, progress_cb=None if detailed else progress, errors=errors)
-                self._cleanup_sidecars(out_dir, basename, ext)
-                if code == 0 and target.exists():
-                    job.rate_hits = max(0, job.rate_hits - 1)
+                self._cleanup_sidecars(stage, basename, ext)
+                try:
+                    complete = code == 0 and staged.stat().st_size > 0
+                except OSError:
+                    complete = False
+                if complete:
+                    self.rate_hits = max(0, self.rate_hits - 1)
                     return True, ""
-                why = _short_error(errors) or f"exit code {code}"
+                shutil.rmtree(stage, ignore_errors=True)      # no partial file carries over
+                why = _short_error(errors) or ("empty file" if code == 0 else f"exit code {code}")
                 if _RATE_LIMIT_RE.search("\n".join(errors)):
                     await self._rate_limited(job)
                 if attempt < _DL_ATTEMPTS and job.status != "cancelled":
@@ -1204,37 +1525,9 @@ class JobManager:
                     await asyncio.sleep(_DL_BACKOFF * attempt)
             return False, why
 
-        if detailed:
-            await self._emit(job, f"\r\n{label}\r\n")
-        if settings.get("skip_existing", True) and target.exists():
-            await status("\x1b[33m\u23ed already downloaded\x1b[0m", store=True)
-            # Still this job's result: from another device, Save should hand it over rather
-            # than a re-run playlist finishing with nothing to save.
-            job.produced.append(str(target))
-            return await finish(TrackOutcome(track, "skipped", "output file already exists", [],
-                                             saved_as=target.name))
-        if settings.get("skip_existing", True) and settings.get("_library_index") and track.artist:
-            existing = settings["_library_index"].find(track.artist, track.title, track.duration)
-            if existing is not None:
-                relative = existing.relative_path
-                job.produced.append(str(existing.path))
-                await status(f"\x1b[33m\u23ed already in library\x1b[0m \x1b[2m({relative})\x1b[0m", store=True)
-                return await finish(TrackOutcome(
-                    track, "skipped", f"matching library file already exists: {relative}", [],
-                ))
-
         try:
-            if phrase:
-                # Not identifiable as a song. This used to download YouTube's top result for
-                # the words, unverified — exactly how a music video, live cut or the wrong song
-                # gets saved. Nothing is downloaded on a guess now.
-                hint = ("SoundCloud-only searches need the artist: type it as 'Artist - Title'"
-                        if service == "soundcloud" else
-                        "couldn't tell which song this is: type it as 'Artist - Title', or paste a link")
-                await status(f"\x1b[33m\u26a0 {hint}\x1b[0m", store=True)
-                return await finish(TrackOutcome(track, "no_candidate", hint, []))
-
             await status("\x1b[2m\U0001f50e searching sources...\x1b[0m")
+            await phase("Searching")
             allowed = candidate_search.SERVICE_SOURCES[service]
             # Strict matching (the default): only a verified match is ever downloaded. On 120
             # real songs every remaining wrong pick was an unverified "plausible" one, so those
@@ -1242,8 +1535,14 @@ class JobManager:
             strict = settings.get("strict_matching", True)
 
             async def search(deep: bool):
-                found = await asyncio.to_thread(
-                    candidate_search.search_all, track.artist, track.title, service, deep=deep)
+                try:
+                    found = await asyncio.wait_for(asyncio.to_thread(
+                        candidate_search.search_all, track.artist, track.title, service, deep=deep),
+                        _SEARCH_DEADLINE)
+                except asyncio.TimeoutError:
+                    # A search that hangs mustn't hold this track (and a worker) forever; it
+                    # counts as "didn't answer" and is retried at the end.
+                    return [], set(allowed)
                 failed = set(getattr(found, "failed", ()) or ())
                 # Belt and braces for the source choice: never download from a service the
                 # user (or the access gate) excluded, whatever the search layer returned.
@@ -1270,7 +1569,7 @@ class JobManager:
                 failed &= failed_again          # a source that answered the second time is fine
                 choice, pool = pick(candidates)
             decisions = choice.decisions
-            unanswered = ", ".join(_SOURCE_NAMES.get(s, s) for s in sorted(failed))
+            unanswered = ", ".join(_SOURCE_NAMES.get(src, src) for src in sorted(failed))
             if not decisions:
                 if unanswered:
                     msg = f"{unanswered} didn't answer - will retry at the end"
@@ -1331,7 +1630,10 @@ class JobManager:
                     retryable=bool(unanswered) and not attempts,
                 ))
 
-            await asyncio.to_thread(self._tag, target, track)
+            await phase("Saving")
+            await asyncio.to_thread(self._tag, staged, track)
+            await asyncio.to_thread(self._publish, staged, target, broken)
+            self._claims.written_by[claim_key] = identity
             job.produced.append(str(target))
             result = "downloaded" if selected.accepted else "downloaded_for_review"
             tail = f"\x1b[2m{target.name} ({selected.candidate.source}, {selected.score}/100)\x1b[0m"
@@ -1351,6 +1653,27 @@ class JobManager:
         except Exception as exc:  # noqa: BLE001
             await status(f"\x1b[31m\u2717 {exc}\x1b[0m", store=True)
             return await finish(TrackOutcome(track, "download_failed", str(exc), []))
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+            try:
+                stage.parent.rmdir()                  # the staging folder, once nothing's in it
+            except OSError:
+                pass
+
+    @staticmethod
+    def _publish(staged: Path, target: Path, broken: Path | None) -> None:
+        """Move a finished download to its real name in one step. A broken file that was in
+        the way is kept beside it ("... (unreadable).opus"), never deleted."""
+        if broken is not None and broken.exists():
+            n = 1
+            while True:
+                suffix = " (unreadable)" if n == 1 else f" (unreadable {n})"
+                keep = broken.with_name(f"{broken.stem}{suffix}{broken.suffix}")
+                if not keep.exists():
+                    break
+                n += 1
+            os.replace(broken, keep)
+        os.replace(staged, target)
 
     @staticmethod
     def _cleanup_sidecars(out_dir: Path, basename: str, audio_ext: str) -> None:

@@ -24,6 +24,7 @@ from app.library import LibraryIndex, LibraryTrack, find_duplicate_groups
 from app.matching import Candidate
 from app.review_report import TrackOutcome
 from app.spotify_resolver import Track
+from support import make_audio, write_output
 
 
 def request(sid="s1"):
@@ -258,7 +259,7 @@ class SoundCloudOnlyTests(unittest.IsolatedAsyncioTestCase):
 
         async def download(_job, argv, emit, **kwargs):
             argvs.append(argv)
-            (Path(self.tmp.name) / f"{track.artist} - {track.title}.opus").touch()
+            write_output(argv)
             return 0
 
         with patch("app.jobs.candidate_search.resolve_phrase") as resolve, \
@@ -327,8 +328,7 @@ class SoundCloudOnlyTests(unittest.IsolatedAsyncioTestCase):
 class DeliverableFilesTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_track_that_already_existed_is_part_of_the_jobs_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "Nova - Midnight Run.opus"
-            target.touch()
+            target = make_audio(Path(tmp) / "Nova - Midnight Run.opus")
             job = Job("x", "youtube", None, "", settings={"output_dir": tmp, "audio_format": "opus"})
             result = await JobManager()._fetch_track(job, Track("Nova", "Midnight Run"), job.settings, True, 1, 1)
             job.status = "done"
@@ -340,7 +340,7 @@ class DeliverableFilesTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             existing = Path(tmp) / "old" / "Nova - Midnight Run.mp3"
             existing.parent.mkdir()
-            existing.touch()
+            existing.write_bytes(b"\x00" * 64)
             item = LibraryTrack(path=existing, relative_path="old/Nova - Midnight Run.mp3",
                                 title="Midnight Run", artist="Nova", album="", duration=180,
                                 bitrate=0, sample_rate=0, channels=0, codec="mp3", size=1,
@@ -372,7 +372,7 @@ class DeliverableFilesTests(unittest.IsolatedAsyncioTestCase):
             out = Path(tmp)
             for name in ("Song.opus", "Other.webm.part", "Other.f251.webm", "Third.temp.opus",
                          "Review report.html"):
-                (out / name).touch()
+                (out / name).write_bytes(b"\x00" * 64)
             for status in ("error", "cancelled"):
                 job = Job("x", "youtube", None, "")
                 job.out_dir = out
@@ -405,7 +405,8 @@ class OutcomeCountTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partial_failure_is_counted_and_the_failures_kept_for_retry(self):
         job = await self.run_list(["downloaded", "download_failed", "no_candidate", "skipped"])
-        self.assertEqual({"downloaded": 1, "review": 0, "skipped": 1, "failed": 2, "total": 4}, job.counts)
+        self.assertEqual({"downloaded": 1, "review": 0, "skipped": 1, "failed": 2, "temporary": 0,
+                          "total": 4}, job.counts)
         self.assertEqual(["Song 1", "Song 2"], [t.title for t in job.failed_tracks])
         self.assertEqual(("done", 1), (job.status, job.code))
         self.assertTrue(job.to_dict()["can_retry_failed"])

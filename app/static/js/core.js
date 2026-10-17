@@ -24,8 +24,10 @@
   // A network failure, an HTTP error, an HTML error page and a malformed reply are all
   // failures; only a 2xx JSON object/array is a success. Callers act on `ok`, never on the
   // mere absence of an `error` key (which made an HTML 500 look like a queued download).
-  // timeoutMs: give up on a request that never answers (a stalled tunnel), so Retry starts a
-  // fresh attempt instead of waiting on the stuck one. 0 = wait as long as it takes.
+  // timeoutMs: give up on a request that doesn't finish — no headers, or headers and then a
+  // body that stalls (a stalled tunnel) — so Retry starts a fresh attempt instead of waiting
+  // on the stuck one. The deadline covers reading the reply too: it used to stop at the
+  // headers, and a body that never finished left the request pending forever. 0 = no limit.
   async function requestJson(fetchImpl, path, { method = "GET", body, offlineMessage, timeoutMs = 0 } = {}) {
     const opts = { method, headers: {} };
     if (body !== undefined) {
@@ -33,42 +35,57 @@
       opts.body = JSON.stringify(body);
     }
     let timer = null;
+    let deadline = null;
     let timedOut = false;
-    if (timeoutMs > 0 && typeof AbortController !== "undefined") {
-      const controller = new AbortController();
-      opts.signal = controller.signal;
-      timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    if (timeoutMs > 0) {
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      if (controller) opts.signal = controller.signal;
+      deadline = new Promise((_resolve, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new Error("timeout"));
+          if (controller) controller.abort();
+        }, timeoutMs);
+      });
+      deadline.catch(() => {});                       // handled where it's raced
     }
-    let res;
+    const raced = (promise) => (deadline ? Promise.race([promise, deadline]) : promise);
+    const tooSlow = { ok: false, offline: true, timedOut: true, status: 0, data: null,
+                      error: "OmniDL took too long to answer. Try again." };
     try {
-      res = await fetchImpl(path, opts);
-    } catch (_) {
-      if (timedOut) {
+      let res;
+      try {
+        res = await raced(fetchImpl(path, opts));
+      } catch (_) {
+        if (timedOut) return tooSlow;
         return { ok: false, offline: true, status: 0, data: null,
-                 error: "OmniDL took too long to answer. Try again." };
+                 error: offlineMessage || "Can't reach OmniDL — is it still running?" };
       }
-      return { ok: false, offline: true, status: 0, data: null,
-               error: offlineMessage || "Can't reach OmniDL — is it still running?" };
+      let data = null;
+      try {
+        data = await raced(res.json());
+      } catch (_) {
+        if (timedOut) return tooSlow;
+        data = null;
+      }
+      const isObject = data !== null && typeof data === "object";
+      if (!res.ok) {
+        const detail = isObject ? (data.error || (typeof data.detail === "string" ? data.detail : "")) : "";
+        return {
+          ok: false, offline: false, status: res.status, data: isObject ? data : null,
+          error: detail || httpMessage(res.status),
+          needsUnlock: !!(isObject && data.needs_unlock),
+          field: isObject && typeof data.field === "string" ? data.field : "",
+        };
+      }
+      if (!isObject) {
+        return { ok: false, offline: false, status: res.status, data: null,
+                 error: "OmniDL sent an unexpected reply. Try again." };
+      }
+      return { ok: true, offline: false, status: res.status, data, error: "" };
     } finally {
       if (timer) clearTimeout(timer);
     }
-    let data = null;
-    try { data = await res.json(); } catch (_) { data = null; }
-    const isObject = data !== null && typeof data === "object";
-    if (!res.ok) {
-      const detail = isObject ? (data.error || (typeof data.detail === "string" ? data.detail : "")) : "";
-      return {
-        ok: false, offline: false, status: res.status, data: isObject ? data : null,
-        error: detail || httpMessage(res.status),
-        needsUnlock: !!(isObject && data.needs_unlock),
-        field: isObject && typeof data.field === "string" ? data.field : "",
-      };
-    }
-    if (!isObject) {
-      return { ok: false, offline: false, status: res.status, data: null,
-               error: "OmniDL sent an unexpected reply. Try again." };
-    }
-    return { ok: true, offline: false, status: res.status, data, error: "" };
   }
 
   const isJob = (d) => !!d && typeof d.id === "string" && typeof d.status === "string";
@@ -250,11 +267,26 @@
         const row = d.rows[index];
         if (!row) return d.revision;
         const lines = d.text.split(/\r?\n/);
-        const at = lines.findIndex((line) => line.trim() === row.raw.trim());
+        // Rows are keyed by their text and which copy of it they are ("Song" #1, #2...).
+        // Remove that copy, then renumber the later copies, so an edit on the second
+        // "Song" stays with it — it used to become #1 and inherit nothing.
+        const nth = Number(row.key.split("\u0000")[1]) || 1;
+        let seen = 0;
+        const at = lines.findIndex((line) => line.trim() === row.raw.trim() && ++seen === nth);
         if (at < 0) return d.revision;
         lines.splice(at, 1);
         delete d.edits[row.key];
         delete d.excluded[row.key];
+        const prefix = `${row.key.split("\u0000")[0]}\u0000`;
+        for (const store of [d.edits, d.excluded]) {
+          const later = Object.keys(store)
+            .filter((k) => k.startsWith(prefix) && Number(k.slice(prefix.length)) > nth)
+            .sort((a, b) => Number(a.slice(prefix.length)) - Number(b.slice(prefix.length)));
+          for (const k of later) {
+            store[`${prefix}${Number(k.slice(prefix.length)) - 1}`] = store[k];
+            delete store[k];
+          }
+        }
         d.text = lines.join("\n");
         return change();
       },
@@ -337,7 +369,12 @@
       const bits = [];
       if (counts.downloaded) bits.push(`${counts.downloaded} saved` + (counts.review ? ` (${counts.review} to check)` : ""));
       if (counts.skipped) bits.push(`${counts.skipped} already had`);
-      if (counts.failed) bits.push(`${counts.failed} not found`);
+      // "Not found" and "hit a temporary problem" are different news: the second is worth
+      // retrying later (a rate limit, a search that didn't answer).
+      const temporary = Math.min(counts.temporary || 0, counts.failed || 0);
+      const notFound = (counts.failed || 0) - temporary;
+      if (notFound) bits.push(`${notFound} not found`);
+      if (temporary) bits.push(`${temporary} hit a temporary problem`);
       outcome = bits.join(" · ") + (counts.total ? ` — ${plural(counts.total, "track")}` : "");
     }
 

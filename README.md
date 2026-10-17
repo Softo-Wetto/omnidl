@@ -156,12 +156,17 @@ startup once it's six months old, before Cloudflare stops accepting it. Its log 
 `cloudflared.log` beside `config.json`. If you change OmniDL's port (`OMNIDL_PORT`), change
 `service:` in the tunnel config to match.
 
-**Save** streams the zip as it's built, so the download starts straight away whatever its size
-(Cloudflare cuts off a response that hasn't started within 100 s), shows real progress, and
-needs no temporary copy on the PC. Archives over 4 GB use ZIP64. Two Saves send at a time; the
-rest of OmniDL stays responsive meanwhile. **Save** also covers songs a re-run found already in
-your library (in any format), and a job that failed or was cancelled part-way offers **Save
-available files (N)** for whatever it finished.
+**Save** first checks the files are still there (a moved or expired file is a message on the
+dashboard, not an error page), then streams the zip as it's built, so the download starts
+straight away whatever its size (Cloudflare cuts off a response that hasn't started within
+100 s), shows real progress, and needs no temporary copy on the PC. Archives over 4 GB use
+ZIP64; names inside are always unique (a repeated name gets its folders added, e.g.
+`Album B - Disc 1 - Song.mp3`); and if a file changes while it's being sent (a tag repair,
+another download), the Save fails and says so rather than handing over a corrupt zip. Two Saves
+send at a time; the rest of OmniDL stays responsive meanwhile. **Save** covers every file a job
+ends up with — including songs a re-run found already in your library (in any format) and
+SoundCloud playlists, which scdl puts in a subfolder — and a job that failed or was cancelled
+part-way offers **Save available files (N)** for whatever it finished.
 
 Remote logins carry a validity window, so the PC's clock matters. OmniDL allows 10 minutes of
 drift and warns at startup when the clock is off by more than a minute — if it does, turn on
@@ -201,13 +206,25 @@ to be enabled).
   updating line, output is colour-coded, and it scrolls natively (drag the bar or use the
   wheel). **Copy** grabs the whole log; a **↓ Jump to latest** pill appears if you scroll up.
 - **Skip already-downloaded tracks** (on by default) indexes nested folders and matches
-  artist, title, and duration across formats, so an existing MP3 can prevent a duplicate Opus download.
+  artist, title, and duration across formats, so an existing MP3 can prevent a duplicate Opus
+  download. Only real, playable audio counts: an empty or cut-off file left by a failed
+  conversion is downloaded again, and the broken one is kept beside it as
+  `… (unreadable).opus` rather than deleted.
+- **One copy at a time** — the same song in two rows of a list, or in two playlists running at
+  once, is downloaded once: the second waits and then finds the first one's file. Downloads are
+  written to a hidden `.omnidl-staging` folder and moved to their real name only when complete,
+  so a half-finished file never sits in your library.
 - **Parallel downloads** — Settings → *Parallel* (default 3, up to 8) downloads that many
   playlist tracks at once for a big speedup. At >1 the log switches to a compact per-track
   checklist (`✓ [12/64] Artist — Title`); at 1 you get the detailed per-track stream.
 - **Persistent history** — your queue/history and each job's log are saved to `history.json`
-  and restored on restart. Jobs that were mid-download when the app closed show as
-  *cancelled (interrupted)*.
+  (written atomically, with the previous version kept as `history.json.bak`, which is used if
+  the main file is ever damaged) and restored on restart. Jobs that were mid-download when the
+  app closed show as *cancelled (interrupted)*.
+- **What a job is doing right now** — its card says *Searching*, *Downloading*, *Saving*,
+  *Paused — YouTube is rate-limiting* (a pause that now applies to every job at once) or
+  *Retrying 2/3*, and a finished list tells "3 not found" apart from "2 hit a temporary problem"
+  (worth retrying later).
 - **At-a-glance results** — a finished job with tracks to check shows **⚠ Review N**, which
   opens its review report from any device; a failed job shows why on its card (e.g. "YouTube
   bot check - cookies needed", with a **How to fix** button) without opening the log. If the
@@ -398,6 +415,12 @@ first run; rebuilding keeps them.
 **ffmpeg is still required** and must be on your PATH (or drop `ffmpeg.exe` into the
 `OmniDL` folder). The bundle does not include ffmpeg.
 
+The build stops and says so if installing PyInstaller or building fails (it only reports
+"Done" when `OmniDL.exe` really exists), and the exe's own settings, history and downloads are
+put back even after a failed build. `python packaging\smoke_test.py` checks a finished build:
+it starts the exe on a spare port, loads the dashboard, runs the bundled yt-dlp and scdl, and
+shuts it down.
+
 > How it works: in frozen mode OmniDL re-invokes itself as
 > `OmniDL.exe --run-tool <spotdl|yt-dlp|scdl> …` and dispatches to the bundled module, so
 > each download is still a separate streaming subprocess — no tools on PATH needed.
@@ -410,7 +433,7 @@ first run; rebuilding keeps them.
 | Match to track length | Spotify (embed) | Pick the YouTube result whose duration matches the track. |
 | Spotify Client ID / Secret | spotDL method | Only used if Source = spotdl. |
 | Spotify filename template | spotDL method | e.g. `{artists} - {title}.{output-ext}`. |
-| Output folder | all | Defaults to `./downloads`. Checked before saving: a path that can't be created or written to is refused next to the field, and the old setting stays. |
+| Output folder | all | Defaults to `./downloads`. Checked before saving: a path that can't be created or written to is refused next to the field, and the old setting stays. `%USERPROFILE%\Music`, `$HOME/Music` and `~\Music` are expanded and saved as the full path, so the folder that was checked is the one that's used. |
 | Audio format | all | opus (default) / m4a / mp3 / flac / wav / ogg. |
 | Bitrate | yt-dlp + spotDL | Used when audio is converted (always for MP3). `auto` = 192 kbps. |
 | Only download verified matches | all matching | On by default — see [How a song is matched](#how-a-song-is-matched). |
@@ -424,6 +447,19 @@ first run; rebuilding keeps them.
 Large playlists can trip YouTube's bot checks. Export a `cookies.txt` (e.g. with a
 "Get cookies.txt" browser extension) and set its path in **Settings → Cookie file**, or pick
 a browser under **Cookies from browser** so yt-dlp authenticates as you.
+
+## Checking it works
+
+```bash
+python tests/run_all.py          # Python + JavaScript tests and the browser checks
+python tests/run_all.py --exe    # ...plus the standalone exe smoke test
+```
+
+Everything runs on temporary copies with mocked downloads: no test can reach the internet
+(a guard in `tests/network_guard.py` makes any attempt fail), and none touches your settings or
+library. The browser checks drive headless Edge (or Chrome) through failed and out-of-order
+requests, edits made while saving, keyboard focus and widths from 320 to 1440 px. On success the
+exact versions they passed with are written to `docs/tested-versions.txt`.
 
 ## Notes
 

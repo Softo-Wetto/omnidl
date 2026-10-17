@@ -1,0 +1,62 @@
+{
+  "expandedPath": {
+    "saved": "%OMNIDL_AUDIT_ROOT%\\music",
+    "loaded": "%OMNIDL_AUDIT_ROOT%\\music",
+    "absolute": false,
+    "validatedFolderExists": true
+  },
+  "simultaneousIdempotency": {
+    "jobs": 2,
+    "differentIds": true
+  },
+  "zipDuplicateNames": {
+    "names": [
+      "Song.mp3",
+      "Disc 1 - Song.mp3",
+      "Disc 1 - Song.mp3"
+    ],
+    "unique": 2,
+    "entries": 3
+  },
+  "zipChangedFile": {
+    "badCrcFile": "changing.mp3",
+    "streamLengthMatchesAdvertised": true
+  },
+  "emptyExistingFile": {
+    "bytes": 0,
+    "outcome": "skipped",
+    "hasFiles": true
+  },
+  "soundcloudSkippedFiles": {
+    "hasFiles": false,
+    "recorded": 0
+  },
+  "hostedNestedPlaylist": {
+    "actualNestedFiles": 1,
+    "listedFiles": 0,
+    "hasFiles": false
+  },
+  "interruptedHostedExpiry": {
+    "restoredStatus": "cancelled",
+    "finished": null,
+    "expires": null,
+    "matchesCleanupPredicate": false
+  },
+  "playlistProgress": {
+    "sequence": [
+      0,
+      25,
+      50,
+      25,
+      75,
+      50,
+      75,
+      100
+    ],
+    "regresses": true
+  },
+  "duplicateOutputWriters": {
+    "calls": 2,
+    "sameTarget": true
+  }
+}

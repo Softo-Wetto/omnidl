@@ -1,0 +1,14 @@
+{
+  "commit": "3531008",
+  "buildFailure": {
+    "exitCode": 0,
+    "reportedDone": true,
+    "executableExists": false,
+    "stdout": "============================================\n Building OmniDL standalone app...\n (collect-all on spotdl/yt-dlp takes a few minutes)\n============================================\nAUDIT: pip failed\nAUDIT: build failed\n\nDone. The app is in:  packaging\\dist\\OmniDL\\OmniDL.exe\nPress any key to continue . . . \n",
+    "stderr": ""
+  },
+  "launcher": {
+    "exitCode": 0,
+    "stdout": "AUDIT_ARGS=[\"--restart\", \"--no-browser\"]\n"
+  }
+}

@@ -11,6 +11,9 @@ AUDIO_EXTENSIONS = {
     ".aac", ".flac", ".m4a", ".mp3", ".mp4", ".ogg", ".opus", ".wav", ".webm",
 }
 LOSSLESS_CODECS = {"flac", "wav", "alac"}
+# Where downloads are written before they're complete (see jobs._fetch_track). Never part of
+# the library: a half-converted file there must not count as a song you already have.
+STAGING_DIR = ".omnidl-staging"
 _SPACE_RE = re.compile(r"\s+")
 _NON_WORD_RE = re.compile(r"[^\w]+", re.UNICODE)
 
@@ -292,6 +295,9 @@ class LibraryIndex:
                 if id(item) not in seen:
                     seen.add(id(item))
                     matches.append(item)
+        # An empty or unreadable file isn't a song you have: counting it made every retry skip
+        # the track and Save hand out a broken file.
+        matches = [item for item in matches if item.size > 0 and "unreadable" not in item.issues]
         if duration:
             matches = [
                 item for item in matches
@@ -363,6 +369,7 @@ def _audio_paths(root: Path) -> list[Path]:
     return sorted(
         path for path in root.rglob("*")
         if path.is_file() and path.suffix.casefold() in AUDIO_EXTENSIONS
+        and STAGING_DIR not in path.relative_to(root).parts
     )
 
 

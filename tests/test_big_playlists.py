@@ -16,6 +16,7 @@ from app.jobs import Job, JobManager
 from app.matching import Candidate
 from app.review_report import TrackOutcome
 from app.spotify_resolver import Track
+from support import write_output
 
 
 def page(offset, size, total):
@@ -116,7 +117,7 @@ class SecondChanceTests(unittest.IsolatedAsyncioTestCase):
                 return [audio] if deep else [video]
 
             async def download(_job, argv, emit, **kwargs):
-                target.touch()
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", side_effect=search), \
@@ -140,7 +141,7 @@ class SecondChanceTests(unittest.IsolatedAsyncioTestCase):
                 return [Candidate("youtube_music", f"https://yt/{title}", title, "Nova", 180, True)]
 
             async def download(_job, argv, emit, **kwargs):
-                Path(argv[argv.index("-o") + 1].replace("%(ext)s", "opus")).touch()
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", side_effect=search), \
@@ -148,7 +149,8 @@ class SecondChanceTests(unittest.IsolatedAsyncioTestCase):
                  patch.object(JobManager, "_sleep_unless_cancelled", AsyncMock()):
                 job.status = "running"
                 await manager._run_tracklist_job(job)
-        self.assertEqual({"downloaded": 3, "review": 0, "skipped": 0, "failed": 0, "total": 3}, job.counts)
+        self.assertEqual({"downloaded": 3, "review": 0, "skipped": 0, "failed": 0, "temporary": 0,
+                          "total": 3}, job.counts)
         self.assertIn("retrying 1 track", job.output)
 
 
@@ -167,7 +169,7 @@ class RateLimitTests(unittest.IsolatedAsyncioTestCase):
                 if attempts["n"] == 1:
                     errors.append("ERROR: [youtube] x: HTTP Error 429: Too Many Requests")
                     return 1
-                target.touch()
+                write_output(argv)
                 return 0
 
             async def sleep(_job, seconds):
@@ -211,7 +213,8 @@ class TwoHundredFiftyTracksTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(manager, "_fetch_track", side_effect=fetch):
                 job.status = "running"
                 await manager._run_tracklist_job(job)
-        self.assertEqual({"downloaded": 220, "review": 0, "skipped": 25, "failed": 5, "total": 250}, job.counts)
+        self.assertEqual({"downloaded": 220, "review": 0, "skipped": 25, "failed": 5, "temporary": 0,
+                          "total": 250}, job.counts)
         self.assertEqual(("done", 100), (job.status, job.progress))
         self.assertLessEqual(running["max"], 4)
         live = [m["counts"] for m in sent if m.get("type") == "progress" and m.get("counts")]

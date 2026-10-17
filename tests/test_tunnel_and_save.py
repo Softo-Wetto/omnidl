@@ -15,6 +15,7 @@ from app.jobs import Job, JobManager, _audio_snapshot, _collect_produced
 from app.matching import Candidate
 from app.spotify_resolver import Track
 from app.tunnel import Tunnel, close_job, kill_with_this_process, start_from_config
+from support import write_output
 
 
 def _alive(proc: subprocess.Popen) -> bool:
@@ -73,7 +74,7 @@ class LocalSaveTests(unittest.TestCase):
     def test_a_local_job_lists_exactly_the_files_it_made(self):
         with tempfile.TemporaryDirectory() as tmp:
             a, b = Path(tmp) / "A - Song.opus", Path(tmp) / "B - Song.opus"
-            a.touch(); b.touch()
+            a.write_bytes(b"\x00" * 64); b.write_bytes(b"\x00" * 64)
             (Path(tmp) / "Someone Else - Old.opus").touch()       # already in the library
             job = local_job()
             job.produced = [str(a), str(b), str(a), str(Path(tmp) / "deleted.opus")]
@@ -149,8 +150,8 @@ class TrackListSaveTests(unittest.IsolatedAsyncioTestCase):
             song = Candidate("youtube_music", "https://yt/1", "Midnight Run", "Nova", 180, True)
             target = Path(tmp) / "Nova - Midnight Run.opus"
 
-            async def download(_job, _argv, emit, **_kwargs):
-                target.touch()
+            async def download(_job, argv, emit, **_kwargs):
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", return_value=[song]), \

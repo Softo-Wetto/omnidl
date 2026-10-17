@@ -1,0 +1,324 @@
+{
+  "layouts": [
+    {
+      "width": 1440,
+      "theme": "dark",
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 799.90625,
+        "height": 46,
+        "right": 836.90625,
+        "bottom": 152
+      },
+      "format": {
+        "x": 1132.421875,
+        "y": 106,
+        "width": 75,
+        "height": 46,
+        "right": 1207.421875,
+        "bottom": 152
+      },
+      "now": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "right": 0,
+        "bottom": 0
+      },
+      "queue": {
+        "x": 1080,
+        "y": 229,
+        "width": 340,
+        "height": 651,
+        "right": 1420,
+        "bottom": 880
+      },
+      "overflow": []
+    },
+    {
+      "width": 820,
+      "theme": "dark",
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 746,
+        "height": 46,
+        "right": 783,
+        "bottom": 152
+      },
+      "format": {
+        "x": 322.515625,
+        "y": 162,
+        "width": 75,
+        "height": 41,
+        "right": 397.515625,
+        "bottom": 203
+      },
+      "now": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "right": 0,
+        "bottom": 0
+      },
+      "queue": {
+        "x": 20,
+        "y": 688,
+        "width": 780,
+        "height": 472,
+        "right": 800,
+        "bottom": 1160
+      },
+      "overflow": []
+    },
+    {
+      "width": 768,
+      "theme": "dark",
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 694,
+        "height": 46,
+        "right": 731,
+        "bottom": 152
+      },
+      "format": {
+        "x": 322.515625,
+        "y": 162,
+        "width": 75,
+        "height": 41,
+        "right": 397.515625,
+        "bottom": 203
+      },
+      "now": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "right": 0,
+        "bottom": 0
+      },
+      "queue": {
+        "x": 20,
+        "y": 594.40625,
+        "width": 728,
+        "height": 409.59375,
+        "right": 748,
+        "bottom": 1004
+      },
+      "overflow": []
+    },
+    {
+      "width": 390,
+      "theme": "dark",
+      "input": {
+        "x": 25,
+        "y": 140,
+        "width": 330,
+        "height": 47,
+        "right": 355,
+        "bottom": 187
+      },
+      "format": {
+        "x": 194,
+        "y": 195,
+        "width": 161,
+        "height": 42,
+        "right": 355,
+        "bottom": 237
+      },
+      "now": {
+        "x": 12,
+        "y": 400,
+        "width": 356,
+        "height": 158,
+        "right": 368,
+        "bottom": 558
+      },
+      "queue": {
+        "x": 12,
+        "y": 572,
+        "width": 356,
+        "height": 811,
+        "right": 368,
+        "bottom": 1383
+      },
+      "overflow": []
+    },
+    {
+      "width": 320,
+      "theme": "dark",
+      "input": {
+        "x": 25,
+        "y": 140,
+        "width": 260,
+        "height": 47,
+        "right": 285,
+        "bottom": 187
+      },
+      "format": {
+        "x": 159,
+        "y": 195,
+        "width": 126,
+        "height": 42,
+        "right": 285,
+        "bottom": 237
+      },
+      "now": {
+        "x": 12,
+        "y": 400,
+        "width": 286,
+        "height": 158,
+        "right": 298,
+        "bottom": 558
+      },
+      "queue": {
+        "x": 12,
+        "y": 572,
+        "width": 286,
+        "height": 908,
+        "right": 298,
+        "bottom": 1480
+      },
+      "overflow": [
+        "queue-summary"
+      ]
+    },
+    {
+      "width": 390,
+      "theme": "light",
+      "input": {
+        "x": 25,
+        "y": 140,
+        "width": 330,
+        "height": 47,
+        "right": 355,
+        "bottom": 187
+      },
+      "format": {
+        "x": 194,
+        "y": 195,
+        "width": 161,
+        "height": 42,
+        "right": 355,
+        "bottom": 237
+      },
+      "now": {
+        "x": 12,
+        "y": 400,
+        "width": 356,
+        "height": 158,
+        "right": 368,
+        "bottom": 558
+      },
+      "queue": {
+        "x": 12,
+        "y": 572,
+        "width": 356,
+        "height": 811,
+        "right": 368,
+        "bottom": 1383
+      },
+      "overflow": []
+    },
+    {
+      "width": 1440,
+      "theme": "light",
+      "input": {
+        "x": 37,
+        "y": 106,
+        "width": 799.90625,
+        "height": 46,
+        "right": 836.90625,
+        "bottom": 152
+      },
+      "format": {
+        "x": 1132.421875,
+        "y": 106,
+        "width": 75,
+        "height": 46,
+        "right": 1207.421875,
+        "bottom": 152
+      },
+      "now": {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "right": 0,
+        "bottom": 0
+      },
+      "queue": {
+        "x": 1080,
+        "y": 229,
+        "width": 340,
+        "height": 651,
+        "right": 1420,
+        "bottom": 880
+      },
+      "overflow": []
+    }
+  ],
+  "checks": {
+    "failedSettings": {
+      "preserved": true,
+      "status": "Not saved"
+    },
+    "http500": {
+      "input": "Artist - Keep"
+    },
+    "doubleSubmit": {
+      "calls": 1
+    },
+    "logRace": {
+      "selected": "audit-failed",
+      "text": "B_SELECTED_LOG"
+    },
+    "staleBulk": {
+      "calls": 0,
+      "disabled": true
+    },
+    "dialog": {
+      "focused": "close-settings",
+      "role": "dialog",
+      "ariaModal": "true",
+      "backgroundInert": true
+    },
+    "bulkEscape": {
+      "closed": true
+    },
+    "editsDuringBulk": {
+      "text": "",
+      "persisted": "",
+      "modalClosed": true
+    },
+    "editsDuringSettings": {
+      "value": "3",
+      "dirty": false,
+      "status": "Saved ✓"
+    },
+    "progressFocus": {
+      "before": "Cancel",
+      "after": "BODY",
+      "originalConnected": false
+    },
+    "jobSelectionFocus": {
+      "activeTag": "BODY",
+      "originalConnected": false
+    },
+    "libraryFilter": {
+      "text": "No matching results."
+    }
+  },
+  "startupFailure": {
+    "loaded": false,
+    "formats": 6,
+    "hasSocket": true,
+    "error": "Can't reach OmniDL — is it still running?",
+    "bannerHidden": false
+  },
+  "exceptions": []
+}

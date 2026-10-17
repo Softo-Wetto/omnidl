@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
+import json
 import mimetypes
 import os
 import re
@@ -609,37 +611,73 @@ def _apply_mode(s: dict, payload: dict) -> None:
 # Replies to recent submissions by their client token. A click whose response was lost (the
 # connection dropped) can be sent again with the same token and gets the original reply
 # instead of queueing the same download twice.
-_RECENT_SUBMITS: dict[tuple[str, str], tuple[float, dict]] = {}
+_RECENT_SUBMITS: dict[tuple[str, str, str], tuple[float, str, dict]] = {}
+_INFLIGHT: dict[tuple[str, str, str], asyncio.Future] = {}
 _SUBMIT_TOKEN_TTL = 300
 
 
-def _replayed(request: Request, payload: dict) -> dict | None:
+def _submit_key(request: Request, payload: dict, operation: str) -> tuple[str, str, str] | None:
     token = payload.get("client_token")
     if not isinstance(token, str) or not 8 <= len(token) <= 64:
         return None
-    now = time.time()
-    for key, (when, _reply) in list(_RECENT_SUBMITS.items()):
-        if now - when > _SUBMIT_TOKEN_TTL:
-            _RECENT_SUBMITS.pop(key, None)
-    hit = _RECENT_SUBMITS.get((_sid(request), token))
-    return hit[1] if hit else None
+    return _sid(request), operation, token
 
 
-def _remember(request: Request, payload: dict, reply: dict) -> dict:
-    token = payload.get("client_token")
-    if isinstance(token, str) and 8 <= len(token) <= 64:
-        _RECENT_SUBMITS[(_sid(request), token)] = (time.time(), reply)
-    return reply
+def _fingerprint(payload: dict) -> str:
+    body = {k: v for k, v in payload.items() if k != "client_token"}
+    return hashlib.sha256(json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
+
+async def _once(request: Request, payload: dict, operation: str, handler):
+    """Run a submission at most once per client token.
+
+    The token used to be remembered only after the job was queued — and queueing yields — so
+    two copies of one request arriving together both got through. Now the first registers
+    before doing anything; copies wait for it and get its reply. A copy whose body differs
+    from the original is refused rather than answered with the wrong job, and if the first
+    attempt failed, the next one simply runs.
+    """
+    key = _submit_key(request, payload, operation)
+    if key is None:
+        return await handler(request, payload)
+    fingerprint = _fingerprint(payload)
+    while True:
+        now = time.time()
+        for old, (when, _fp, _reply) in list(_RECENT_SUBMITS.items()):
+            if now - when > _SUBMIT_TOKEN_TTL:
+                _RECENT_SUBMITS.pop(old, None)
+        done = _RECENT_SUBMITS.get(key)
+        if done is not None:
+            if done[1] != fingerprint:
+                return JSONResponse({"error": "That request was already used for a different "
+                                              "download - please try again."}, status_code=409)
+            return done[2]
+        leader = _INFLIGHT.get(key)
+        if leader is None:
+            break
+        await asyncio.shield(leader)
+    leader = asyncio.get_running_loop().create_future()
+    _INFLIGHT[key] = leader
+    try:
+        reply = await handler(request, payload)
+        if isinstance(reply, dict):
+            _RECENT_SUBMITS[key] = (time.time(), fingerprint, reply)
+        return reply
+    finally:
+        _INFLIGHT.pop(key, None)
+        if not leader.done():
+            leader.set_result(None)
 
 
 @app.post("/api/download")
 async def download(request: Request, payload: dict):
+    return await _once(request, payload, "download", _download)
+
+
+async def _download(request: Request, payload: dict):
     text = (payload.get("input") or "").strip()
     if not text:
         return JSONResponse({"error": "empty input"}, status_code=400)
-    replay = _replayed(request, payload)
-    if replay is not None:
-        return replay
     override = payload.get("engine_override") or None
     video = payload.get("media_type") == "video"
     service = "youtube" if video else _TEXT_SERVICES.get(override or "", "auto")
@@ -655,7 +693,7 @@ async def download(request: Request, payload: dict):
     _apply_mode(s, payload)
     s["_youtube_ok"] = _unlocked(request)
     job = await manager.submit(text, s, sid, override, ip=ip)
-    return _remember(request, payload, job.to_dict())
+    return job.to_dict()
 
 
 # A pasted list is capped so one visitor can't turn one paste into an unbounded download
@@ -705,13 +743,14 @@ async def bulk_preview(request: Request, payload: dict):
 
 @app.post("/api/bulk/download")
 async def bulk_download(request: Request, payload: dict):
+    return await _once(request, payload, "bulk", _bulk_download)
+
+
+async def _bulk_download(request: Request, payload: dict):
     """Queue an edited song list: one track-list job, plus a job per pasted link."""
     raw_entries = payload.get("entries")
     if not isinstance(raw_entries, list) or not raw_entries:
         return JSONResponse({"error": "nothing to download"}, status_code=400)
-    replay = _replayed(request, payload)
-    if replay is not None:
-        return replay
     service = payload.get("service")
     service = service if service in candidate_search.SERVICE_SOURCES else "auto"
 
@@ -765,11 +804,11 @@ async def bulk_download(request: Request, payload: dict):
             held_urls.append(url)
             continue
         jobs.append(await manager.submit(url, dict(s), sid, ip=ip))
-    return _remember(request, payload, {
+    return {
         "jobs": [j.to_dict() for j in jobs], "tracks": len(tracks),
         "links": len(urls) - held_back, "links_held_back": held_back,
         # Which links weren't queued, so the browser can keep exactly those for later.
-        "held_back_urls": held_urls})
+        "held_back_urls": held_urls}
 
 
 @app.post("/api/jobs/{job_id}/retry")
@@ -841,6 +880,24 @@ async def delete_job(request: Request, job_id: str):
 def _safe_name(name: str) -> str:
     """A header-safe ASCII fallback filename (the real UTF-8 name is sent separately)."""
     return "".join(c if 32 <= ord(c) < 127 and c not in '"\\' else "_" for c in name) or "download"
+
+
+@app.get("/api/jobs/{job_id}/files")
+async def job_files(request: Request, job_id: str):
+    """What Save would hand over, checked before the browser starts a download — so a moved,
+    expired or deleted file is an inline message instead of the page navigating to an error."""
+    job = _owned(request, job_id)
+    if job is None:
+        return JSONResponse({"error": "That job no longer exists."}, status_code=404)
+    files = await asyncio.to_thread(job.list_files)
+    if not files:
+        return JSONResponse({"error": "Its files are no longer available (they may have expired "
+                                      "or been moved)."}, status_code=404)
+    try:
+        size = sum(f.stat().st_size for f in files)
+    except OSError:
+        size = 0
+    return {"count": len(files), "bytes": size, "zip": len(files) > 1}
 
 
 @app.get("/api/jobs/{job_id}/file")

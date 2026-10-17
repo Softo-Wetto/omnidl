@@ -14,6 +14,7 @@ real progress.
 """
 from __future__ import annotations
 
+import os
 import struct
 import time
 import zlib
@@ -29,6 +30,10 @@ _CHUNK = 1 << 20
 _UTF8_NAMES = 0x0800
 
 
+class FileChanged(OSError):
+    """A file changed after the archive was planned: sending it would make a corrupt zip."""
+
+
 @dataclass
 class _Entry:
     path: Path
@@ -37,6 +42,7 @@ class _Entry:
     offset: int
     dos_time: int
     dos_date: int
+    mtime_ns: int = 0
 
     @property
     def big(self) -> bool:
@@ -63,14 +69,22 @@ def _dos_stamp(mtime: float) -> tuple[int, int]:
 
 
 def arc_names(files: list[Path]) -> list[str]:
-    """Names inside the archive; the same name from two folders gets its folder prefixed."""
+    """Unique names inside the archive, compared case-insensitively (Windows and macOS
+    extract "Song.mp3" and "song.mp3" onto one file). A repeated name gets its folders
+    prefixed, nearest first ("Disc 1 - Song.mp3", "Album B - Disc 1 - Song.mp3"), then a
+    number if even that collides — one prefix alone gave three "Disc 1 - Song.mp3" entries."""
     used: set[str] = set()
     names = []
     for f in files:
-        name = f.name
-        if name in used:
-            name = f"{f.parent.name} - {f.name}"
-        used.add(name)
+        folders = [part for part in f.parent.parts if part not in (f.anchor, "")]
+        candidates = [f.name] + [" - ".join([*folders[-depth:], f.name])
+                                 for depth in range(1, len(folders) + 1)]
+        name = next((c for c in candidates if c.casefold() not in used), None)
+        if name is None:
+            n = 2
+            while (name := f"{f.stem} ({n}){f.suffix}").casefold() in used:
+                n += 1
+        used.add(name.casefold())
         names.append(name)
     return names
 
@@ -84,7 +98,8 @@ class ZipPlan:
         for path, name in zip(files, arc_names(files)):
             st = path.stat()
             dos_time, dos_date = _dos_stamp(st.st_mtime)
-            entry = _Entry(path, name.encode("utf-8"), st.st_size, offset, dos_time, dos_date)
+            entry = _Entry(path, name.encode("utf-8"), st.st_size, offset, dos_time, dos_date,
+                           st.st_mtime_ns)
             self.entries.append(entry)
             offset += 30 + len(entry.name) + entry.local_extra + entry.size
         self.cd_offset = offset
@@ -93,24 +108,51 @@ class ZipPlan:
                           or self.cd_size >= ZIP64_LIMIT)
         self.length = self.cd_offset + self.cd_size + (56 + 20 if self.zip64_end else 0) + 22
 
+    @staticmethod
+    def _unchanged(entry: _Entry, src) -> None:
+        st = os.fstat(src.fileno())
+        if st.st_size != entry.size or st.st_mtime_ns != entry.mtime_ns:
+            raise FileChanged(f"{entry.path.name} changed while it was being saved - try again")
+
+    @staticmethod
+    def _crc(entry: _Entry, src) -> int:
+        crc, left = 0, entry.size
+        while left:
+            block = src.read(min(_CHUNK, left))
+            if not block:
+                raise FileChanged(f"{entry.path.name} got shorter while it was being saved - try again")
+            crc = zlib.crc32(block, crc)
+            left -= len(block)
+        return crc
+
     def chunks(self) -> Iterator[bytes]:
-        """The archive, in order. Raises if a file changed size since the plan was made."""
+        """The archive, in order.
+
+        Every file is checked to be exactly the one planned (size and modified time) before its
+        header is sent, and checked again after its data: a file that changes mid-export —
+        a tag repair, another download — fails the export with FileChanged instead of being
+        sent with a header that doesn't match its bytes (a zip that "downloads" but is corrupt).
+        """
         crcs: list[int] = []
         for entry in self.entries:
             with open(entry.path, "rb") as src:
-                crc = 0
-                while block := src.read(_CHUNK):
-                    crc = zlib.crc32(block, crc)
+                self._unchanged(entry, src)
+                crc = self._crc(entry, src)
+                self._unchanged(entry, src)
                 src.seek(0)
                 crcs.append(crc)
                 yield self._local_header(entry, crc)
-                left = entry.size
+                sent_crc, left = 0, entry.size
                 while left:
                     block = src.read(min(_CHUNK, left))
                     if not block:
-                        raise OSError(f"{entry.path.name} got shorter while it was being sent")
+                        raise FileChanged(f"{entry.path.name} got shorter while it was being saved - try again")
+                    sent_crc = zlib.crc32(block, sent_crc)
                     left -= len(block)
                     yield block
+                self._unchanged(entry, src)
+                if sent_crc != crc:
+                    raise FileChanged(f"{entry.path.name} changed while it was being saved - try again")
         yield b"".join(self._central_header(e, crc) for e, crc in zip(self.entries, crcs))
         yield self._end_records()
 

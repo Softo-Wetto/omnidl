@@ -11,6 +11,7 @@ from app import main
 from app.jobs import Job, JobManager, _short_error
 from app.matching import Candidate
 from app.spotify_resolver import Track
+from support import write_output
 
 
 def settings(temp_dir, **extra):
@@ -71,7 +72,7 @@ class StandInTests(unittest.IsolatedAsyncioTestCase):
                 if url in fails:
                     kwargs["errors"].append("ERROR: [youtube] abc: HTTP Error 403: Forbidden")
                     return 1
-                target.touch()
+                write_output(argv)
                 return 0
 
             async def no_sleep(_):
@@ -110,7 +111,7 @@ class PhraseTests(unittest.IsolatedAsyncioTestCase):
             target = Path(temp_dir) / "Drake - One Dance.opus"
 
             async def download(_job, argv, emit, **kwargs):
-                target.touch()
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.resolve_phrase", return_value=(["Drake"], "One Dance")), \

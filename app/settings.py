@@ -185,6 +185,23 @@ def ensure_output_dir(path: str) -> None:
         pass
 
 
+_UNEXPANDED_RE = re.compile(r"%[^%\\/]+%|\$\{?[A-Za-z_][A-Za-z0-9_]*")
+
+
+def canonical_dir(path: str) -> str:
+    """The folder `path` really means: variables (%USERPROFILE%, $HOME) and ~ expanded, made
+    absolute and normalised. Validation, saving and every use go through this, so the folder
+    that was checked is the folder that gets used — the saved text used to stay "%VAR%/music",
+    which nothing else expanded."""
+    raw = (path or "").strip().strip('"')
+    if not raw:
+        return ""
+    expanded = os.path.expanduser(os.path.expandvars(raw))
+    if not Path(expanded).is_absolute():
+        return expanded
+    return os.path.normpath(os.path.abspath(expanded))
+
+
 def output_dir_problem(path: str) -> str:
     """Why `path` can't be the download folder, or "" if it can (creating it if missing).
 
@@ -194,7 +211,11 @@ def output_dir_problem(path: str) -> str:
     raw = (path or "").strip()
     if not raw:
         return "Choose a folder for downloads."
-    folder = Path(os.path.expandvars(raw)).expanduser()
+    folder_text = canonical_dir(raw)
+    unknown = _UNEXPANDED_RE.search(folder_text)
+    if unknown:
+        return f"{unknown.group(0)} isn't set on this PC. Use the folder's full path instead."
+    folder = Path(folder_text)
     if not folder.is_absolute():
         return "Use a full path, for example C:\\Users\\you\\Music."
     if folder.exists() and not folder.is_dir():
@@ -244,6 +265,9 @@ def load_settings() -> dict:
             pass
     if not data.get("output_dir"):
         data["output_dir"] = str(DEFAULT_OUTPUT)
+    # A folder saved before paths were stored expanded ("%USERPROFILE%\Music") now means the
+    # same place everywhere it's used.
+    data["output_dir"] = canonical_dir(data["output_dir"]) or str(DEFAULT_OUTPUT)
     ensure_output_dir(data["output_dir"])
     return data
 
@@ -252,11 +276,13 @@ def save_settings(new: dict) -> dict:
     """Validate and persist. Raises SettingsError, leaving config.json untouched, if a value
     can't be used."""
     data = load_settings()
-    if isinstance(new.get("output_dir"), str) and new["output_dir"].strip() != data.get("output_dir"):
+    if isinstance(new.get("output_dir"), str) and canonical_dir(new["output_dir"]) != data.get("output_dir"):
         problem = output_dir_problem(new["output_dir"])
         if problem:
             raise SettingsError("output_dir", problem)
-        new = {**new, "output_dir": new["output_dir"].strip()}
+        new = {**new, "output_dir": canonical_dir(new["output_dir"])}
+    elif "output_dir" in new:
+        new = {**new, "output_dir": data.get("output_dir")}
     for key in DEFAULTS:
         if key in new and new[key] is not None:
             value = new[key]

@@ -8,6 +8,7 @@ from app.library import LibraryIndex, LibraryTrack
 from app.matching import Candidate, MatchDecision
 from app.review_report import TrackOutcome
 from app.spotify_resolver import Resolved, Track
+from support import write_output
 
 
 class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
@@ -30,7 +31,7 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
 
             async def download(_job, argv, emit, **_kwargs):
                 attempts.append(argv[-1])
-                target.touch()
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", return_value=[unverified, verified]), \
@@ -51,8 +52,8 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
                                  "Midnight Run (feat. Echo)", "Nova", 180, True)
             target = Path(temp_dir) / "Nova - Midnight Run.opus"
 
-            async def download(_job, _argv, emit, **_kwargs):
-                target.touch()
+            async def download(_job, argv, emit, **_kwargs):
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", return_value=[credited]),                  patch.object(manager, "_stream_subprocess", side_effect=download):
@@ -97,8 +98,8 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
             )
             target = Path(temp_dir) / "Nova - Midnight Run.opus"
 
-            async def download(_job, _argv, emit, **_kwargs):
-                target.touch()
+            async def download(_job, argv, emit, **_kwargs):
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", return_value=[nonexact]), \
@@ -121,8 +122,8 @@ class SpotifyJobTests(unittest.IsolatedAsyncioTestCase):
                 "youtube_music", "https://youtube.test/x", "Boogie (Slowed)", "Nova", 180,
             )
 
-            async def download(_job, _argv, emit, **_kwargs):
-                (Path(temp_dir) / "Nova - Midnight Run.opus").touch()
+            async def download(_job, argv, emit, **_kwargs):
+                write_output(argv)
                 return 0
 
             with patch("app.jobs.candidate_search.search_all", return_value=[wrong]), \

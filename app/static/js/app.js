@@ -28,6 +28,7 @@ const state = {
   historyFilter: "all",
   historySearch: "",
   settingsDirty: false,
+  settingsRevision: 0,          // bumped on every edit, so a save can tell if more came after it
   bulkSubmitting: false,
   connected: false,
 };
@@ -333,7 +334,7 @@ function refreshBanner() {
 /* ---------------- queue rendering ---------------- */
 function jobCtx() { return { local: !!state.meta.local, remote: !!state.meta.remote, now: Date.now() }; }
 
-function makeButton(label, title, handler, cls) {
+function makeButton(label, title, handler, cls, action) {
   const b = document.createElement("button");
   b.type = "button";
   b.textContent = label;
@@ -343,6 +344,8 @@ function makeButton(label, title, handler, cls) {
     if ([...label.trim()].length <= 2) b.setAttribute("aria-label", title);
   }
   if (cls) b.className = cls;
+  // What the button does, so focus can find "the same button" after a card is redrawn.
+  if (action) b.dataset.action = action;
   b.onclick = (e) => { e.stopPropagation(); handler(b); };
   return b;
 }
@@ -353,28 +356,29 @@ function jobActions(job, card) {
   const out = [];
   const id = job.id;
   if (ACTIVE.includes(job.status)) {
-    out.push(makeButton("Cancel", "Cancel this download", () => cancelJob(id), "btn-danger"));
+    out.push(makeButton("Cancel", "Cancel this download", () => cancelJob(id), "btn-danger", "cancel"));
     return out;
   }
   if (card.canSave && canSave()) {
     const tip = state.meta.local ? "Download a copy to this device (it's also in your PC's library)"
                                  : "Download to this device";
-    out.push(makeButton(`⤓ ${card.saveLabel}`, tip, () => { window.location.href = `/api/jobs/${id}/file`; }, "save-btn"));
+    out.push(makeButton(`⤓ ${card.saveLabel}`, tip, (b) => saveJob(job, b), "save-btn", "save"));
   }
   if (job.has_report) {
     // Tracks not downloaded or saved for review. Opens from any device.
     const n = job.review_count || 0;
     out.push(makeButton(n ? `⚠ Review ${n}` : "⚠ Review",
                         "Open the review report: tracks to check or that weren't found",
-                        () => window.open(`/api/jobs/${id}/report`, "_blank", "noopener"), "review-btn"));
+                        () => window.open(`/api/jobs/${id}/report`, "_blank", "noopener"), "review-btn", "review"));
   }
   if (card.canRetryFailed) {
     out.push(makeButton(`↻ Retry ${job.counts ? job.counts.failed : ""} failed`.replace("  ", " "),
-                        "Search again for just the tracks that weren't found", () => retryJob(job, true), "btn-retry"));
+                        "Search again for just the tracks that weren't found", () => retryJob(job, true),
+                        "btn-retry", "retry-failed"));
   }
-  if (card.canRetry) out.push(makeButton("↻ Retry", "Run again", () => retryJob(job), "btn-retry"));
-  if (card.cookieTrouble) out.push(makeButton("How to fix", "What to do about a YouTube block", showCookieHelp, "btn-help"));
-  out.push(makeButton("✕", "Remove from history", () => removeJob(id), "btn-remove"));
+  if (card.canRetry) out.push(makeButton("↻ Retry", "Run again", () => retryJob(job), "btn-retry", "retry"));
+  if (card.cookieTrouble) out.push(makeButton("How to fix", "What to do about a YouTube block", showCookieHelp, "btn-help", "help"));
+  out.push(makeButton("✕", "Remove from history", () => removeJob(id), "btn-remove", "remove"));
   return out;
 }
 
@@ -400,6 +404,16 @@ function progressNode(job) {
   return prog;
 }
 
+function setProgress(root, job) {
+  const fill = root.querySelector(".fill");
+  if (!fill) return false;
+  fill.style.width = (job.progress || 0) + "%";
+  root.querySelector(".bar").setAttribute("aria-valuenow", String(job.progress || 0));
+  const pct = root.querySelector(".pct");
+  if (pct) pct.textContent = job.progress != null ? job.progress + "%" : "";
+  return true;
+}
+
 function renderJob(job) {
   const card = Core.describeJob(job, jobCtx());
   const li = el("li", `job tone-${card.tone}` + (job.id === state.viewingId ? " active" : ""));
@@ -410,6 +424,7 @@ function renderJob(job) {
   // the keyboard and says whether it's the one shown.
   const open = el("button", "job-open");
   open.type = "button";
+  open.dataset.action = "open";
   open.setAttribute("aria-pressed", String(job.id === state.viewingId));
   open.title = `Show the log for ${card.title}`;
   open.append(el("span", "job-input", card.title));
@@ -444,7 +459,60 @@ function renderJob(job) {
   return li;
 }
 
+/* Cards are redrawn as jobs change. Redrawing removes the focused button, which dropped
+   keyboard focus to the page (and confused screen readers) every progress tick. Before a
+   redraw, remember which job and which action had focus; afterwards, put focus back on the
+   same action of the same job — or, if that job is gone, the nearest sensible place. */
+function focusMemo() {
+  const active = document.activeElement;
+  if (!active || active === document.body) return null;
+  const host = active.closest("#active-queue, #queue, #now-card");
+  if (!host) return null;
+  const item = active.closest("[data-id]");
+  return { host: host.id, jobId: item ? item.dataset.id : host.dataset.jobId || null,
+           action: active.dataset.action || "open" };
+}
+
+function restoreFocus(memo) {
+  if (!memo) return;
+  const current = document.activeElement;
+  if (current && current !== document.body && document.contains(current)) return;
+  const sameJob = (sel) => document.querySelector(sel);
+  let target = null;
+  if (memo.host === "now-card") {
+    target = $("#now-card").querySelector(`[data-action="${memo.action}"]`);
+  }
+  if (!target && memo.jobId) {
+    target = sameJob(`#${memo.host} .job[data-id="${memo.jobId}"] [data-action="${memo.action}"]`)
+      || sameJob(`.job[data-id="${memo.jobId}"] [data-action="${memo.action}"]`)   // moved to history
+      || sameJob(`.job[data-id="${memo.jobId}"] .job-open`);
+  }
+  if (!target) target = document.querySelector(`#${memo.host} .job-open`) || document.querySelector(".job-open");
+  if (!target) {
+    const heading = $("#queue-summary");
+    heading.tabIndex = -1;
+    target = heading;
+  }
+  target.focus({ preventScroll: true });
+}
+
+function renderSummary(jobs) {
+  const counts = { running: 0, queued: 0 };
+  let issues = 0;
+  for (const j of jobs) {
+    counts[j.status] = (counts[j.status] || 0) + 1;
+    if (Core.describeJob(j, jobCtx()).tone === "issues") issues += 1;
+  }
+  // Separate chips that wrap, so on a narrow phone nothing (least of all "failed") is cut off.
+  const chips = [
+    [counts.running, "downloading", "running"], [counts.queued, "queued", "queued"],
+    [counts.done, "done", "done"], [issues, "with issues", "issues"], [counts.error, "failed", "error"],
+  ].filter(([n]) => n).map(([n, word, tone]) => el("span", `sum-chip ${tone}`, `${n} ${word}`));
+  $("#queue-summary").replaceChildren(...chips);
+}
+
 function renderQueue() {
+  const memo = focusMemo();
   const jobs = state.order.map((id) => state.jobs.get(id)).filter(Boolean);
   const active = jobs.filter((j) => ACTIVE.includes(j.status))
     .sort((a, b) => (a.status === b.status ? 0 : a.status === "running" ? -1 : 1));
@@ -458,24 +526,28 @@ function renderQueue() {
   $("#history-none").hidden = !(history.length && !shown.length);
   $("#queue-empty").classList.toggle("hidden", jobs.length > 0);
   $("#queue-empty").hidden = jobs.length > 0;
-
-  const counts = { running: 0, queued: 0 };
-  let issues = 0;
-  for (const j of jobs) {
-    counts[j.status] = (counts[j.status] || 0) + 1;
-    if (Core.describeJob(j, jobCtx()).tone === "issues") issues += 1;
-  }
-  const parts = [];
-  if (counts.running) parts.push(`${counts.running} downloading`);
-  if (counts.queued) parts.push(`${counts.queued} queued`);
-  if (counts.done) parts.push(`${counts.done} done`);
-  if (issues) parts.push(`${issues} with issues`);
-  if (counts.error) parts.push(`${counts.error} failed`);
-  $("#queue-summary").textContent = parts.join(" · ");
+  renderSummary(jobs);
   $("#clear-done").title = state.meta.local
     ? "Clears finished downloads from this list. Your music files stay in your library."
     : "Clears finished downloads — and deletes their files from the server, so Save stops working for them.";
   renderNowCard();
+  restoreFocus(memo);
+}
+
+// One job changed: redraw just its card (its counts, its buttons), not the whole history.
+function refreshJob(id) {
+  const job = state.jobs.get(id);
+  const old = document.querySelector(`.job[data-id="${id}"]`);
+  const list = job && old ? old.parentElement : null;
+  const belongs = list && (list.id === "active-queue") === ACTIVE.includes(job.status);
+  if (!belongs) { renderQueue(); return; }
+  const memo = focusMemo();
+  const fresh = renderJob(job);
+  if (old.classList.contains("shown-above")) fresh.classList.add("shown-above");
+  old.replaceWith(fresh);
+  renderSummary(state.order.map((jid) => state.jobs.get(jid)).filter(Boolean));
+  renderNowCard();
+  restoreFocus(memo);
 }
 
 // Phones: the job you care about right now, with its actions, above everything else.
@@ -490,18 +562,40 @@ function nowJob() {
   return null;
 }
 
+function nowCardKey(job, card) {
+  return JSON.stringify([job.id, job.status, card.status, card.outcome, card.destination, card.note,
+                         job.has_report, job.review_count, card.canSave, card.canRetry, card.canRetryFailed]);
+}
+
 function renderNowCard() {
   const host = $("#now-card");
   const pick = nowJob();
-  if (!pick) { host.hidden = true; host.replaceChildren(); return; }
+  // On a phone the card already shows this job, so its copy in "In progress" is hidden
+  // (and the section too if that was its only job) — no more two of the same card.
+  for (const li of document.querySelectorAll("#active-queue .job")) {
+    li.classList.toggle("shown-above", !!pick && li.dataset.id === pick.job.id);
+  }
+  $("#active-section").classList.toggle("only-shown-above",
+    !!pick && document.querySelectorAll("#active-queue .job:not(.shown-above)").length === 0);
+  if (!pick) { host.hidden = true; host.replaceChildren(); host.dataset.key = ""; return; }
   const { job, more } = pick;
   const card = Core.describeJob(job, jobCtx());
+  const key = nowCardKey(job, card) + more;
+  if (host.dataset.key === key && !host.hidden) {
+    // Same job, same state: only the numbers moved. Update them in place so a focused
+    // Cancel button stays focused.
+    setProgress(host, job);
+    const label = host.querySelector(".now-label");
+    if (label) label.textContent = job.label || "";
+    return;
+  }
+  const memo = focusMemo();
   const head = el("div", "now-head");
   head.append(el("strong", "now-title", card.title), el("span", `badge ${card.tone}`, card.status));
   const parts = [head];
   if (job.status === "running") {
     parts.push(progressNode(job));
-    if (job.label) parts.push(el("div", "now-label", job.label));
+    parts.push(el("div", "now-label", job.label || ""));
   }
   const facts = [card.outcome, card.destination].filter(Boolean).join(" · ");
   if (facts) parts.push(el("div", "now-facts", facts));
@@ -512,28 +606,68 @@ function renderNowCard() {
     setTermCollapsed(false);
     viewJob(job.id);
     $("#terminal-wrap").scrollIntoView({ behavior: "smooth", block: "start" });
-  }, "ghost");
+  }, "ghost", "log");
   actions.append(logBtn);
   parts.push(actions);
   if (more > 0) parts.push(el("div", "now-more", `+${more} more in the queue below`));
   host.replaceChildren(...parts);
+  host.dataset.key = key;
+  host.dataset.jobId = job.id;
   host.hidden = false;
+  restoreFocus(memo);
 }
 
 function updateJobProgress(id) {
   const j = state.jobs.get(id);
   if (!j) return;
   const nodes = [...document.querySelectorAll(`.job[data-id="${id}"]`)];
-  if (!nodes.length || nodes.some((li) => !li.querySelector(".fill"))) { renderQueue(); return; }
+  if (!nodes.length || nodes.some((li) => !li.querySelector(".fill"))) { refreshJob(id); return; }
   for (const li of nodes) {
-    li.querySelector(".fill").style.width = (j.progress || 0) + "%";
-    li.querySelector(".bar").setAttribute("aria-valuenow", String(j.progress || 0));
-    const pct = li.querySelector(".pct");
-    if (pct) pct.textContent = j.progress != null ? j.progress + "%" : "";
+    setProgress(li, j);
     const lbl = li.querySelector(".job-label");
     if (lbl) lbl.textContent = j.label || "";
   }
   renderNowCard();
+}
+
+// Selecting a job only moves the highlight; the cards (and the focused title) stay put.
+function markViewing(id) {
+  for (const li of document.querySelectorAll(".job[data-id]")) {
+    const on = li.dataset.id === id;
+    li.classList.toggle("active", on);
+    const open = li.querySelector(".job-open");
+    if (open) open.setAttribute("aria-pressed", String(on));
+  }
+}
+
+// Save: check what's there first, so a moved or expired file is a message on the dashboard
+// instead of the page navigating to an error; then download without leaving the page.
+async function saveJob(job, btn) {
+  await submitGuard.run(`save:${job.id}`, async () => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Preparing…";
+    const r = await api(`/api/jobs/${job.id}/files`, "GET");
+    if (!r.ok) {
+      btn.disabled = false;
+      btn.textContent = label;
+      if (!r.offline) toast(`${r.error} Press Save to try again.`, "error", 8000);
+      return;
+    }
+    const link = document.createElement("a");
+    link.href = `/api/jobs/${job.id}/file`;
+    link.download = "";
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    const what = r.data.zip ? `a zip of ${r.data.count} files` : "the file";
+    toast(`Downloading ${what} (${formatBytes(r.data.bytes)}) — see your browser's downloads.`, "success", 7000);
+    btn.textContent = "Downloading…";
+    setTimeout(() => {
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+    }, 4000);
+  });
 }
 
 // Show one job's log. A slow reply for a job you've since moved away from is dropped, and
@@ -541,7 +675,7 @@ function updateJobProgress(id) {
 async function viewJob(id) {
   const token = logSync.begin(id);
   state.viewingId = id;
-  renderQueue();
+  markViewing(id);
   termClear(false);
   const r = await api(`/api/jobs/${id}/output`, "GET", undefined, { quiet: true });
   if (!logSync.isCurrent(token)) return;
@@ -741,15 +875,15 @@ function handleMessage(msg) {
       const prev = state.jobs.get(msg.job.id);
       const wasActive = prev && !FINISHED.includes(prev.status);
       upsertJob(msg.job);
+      refreshJob(msg.job.id);              // just this card (moved between lists if needed)
       if (msg.job.status === "running" && (!prev || prev.status !== "running")) {
         // With several jobs running at once, only auto-focus if the user isn't already
         // watching another live job (don't yank the terminal away from them).
         const cur = state.jobs.get(state.viewingId);
-        if (!cur || FINISHED.includes(cur.status)) { viewJob(msg.job.id); break; }
+        if (!cur || FINISHED.includes(cur.status)) viewJob(msg.job.id);
       } else if (wasActive && FINISHED.includes(msg.job.status)) {
         notifyFinished(msg.job);
       }
-      renderQueue();
       break;
     }
     case "output":
@@ -762,7 +896,7 @@ function handleMessage(msg) {
       j.progress = msg.progress;
       j.label = msg.label;
       // A finished track updates the card's live tally ("57 saved · 2 not found").
-      if (msg.counts) { j.counts = msg.counts; renderQueue(); } else updateJobProgress(msg.job_id);
+      if (msg.counts) { j.counts = msg.counts; refreshJob(msg.job_id); } else updateJobProgress(msg.job_id);
       break;
     }
     case "removed":
@@ -807,7 +941,11 @@ function offlineMessage() {
 // Every request goes through OmniCore.requestJson, which turns network failures, HTTP errors,
 // HTML error pages and malformed replies into { ok: false, error }. Nothing below treats a
 // reply as success without checking `ok`.
-async function api(path, method = "GET", body, { quiet = false, timeoutMs = 0 } = {}) {
+// Requests that can't finish leave buttons busy forever, so each has a deadline: 30 s by
+// default, none only for the few that legitimately take minutes (library scan, updating yt-dlp).
+const DEFAULT_DEADLINE_MS = 30000;
+
+async function api(path, method = "GET", body, { quiet = false, timeoutMs = DEFAULT_DEADLINE_MS } = {}) {
   const r = await Core.requestJson(fetch, path, { method, body, offlineMessage: offlineMessage(), timeoutMs });
   if (!r.ok && r.offline && !quiet) toast(r.error, "error", 8000);
   return r;
@@ -1034,6 +1172,7 @@ async function saveSettings() {
   await submitGuard.run("settings", async () => {
     const btn = $("#save-settings");
     const status = $("#settings-status");
+    const sentRevision = state.settingsRevision;
     btn.disabled = true;
     clearFieldError();
     status.className = "status-msg";
@@ -1053,11 +1192,19 @@ async function saveSettings() {
       state.settings = r.data;
       state.lastAudioFormat = state.settings.audio_format;
       refreshFormatOptions();
+      updateChip();
+      if (state.settingsRevision !== sentRevision) {
+        // Changed again while saving: keep those newer edits on screen (reloading the form
+        // used to put the old values back and claim "Saved ✓").
+        status.className = "status-msg warn";
+        status.textContent = "Saved — newer changes not saved yet";
+        toast("Saved what you'd set — press Save again for your newer changes.", "info", 6000);
+        return;
+      }
       loadSettingsForm();
       status.className = "status-msg";
       status.textContent = "Saved ✓";
       setTimeout(() => { if (status.textContent === "Saved ✓") status.textContent = ""; }, 2500);
-      updateChip();
       toast("Settings saved", "success");
       if (r.data.cookie_warning) toast("⚠ " + r.data.cookie_warning, "error", 6000);
     } finally {
@@ -1265,7 +1412,17 @@ function renderBulk() {
     return row;
   });
   host.replaceChildren(...rows);
+  if (state.bulkSubmitting) setBulkLocked(true);
   renderBulkState();
+}
+
+// While a list is being sent its controls are locked: an edit made then used to be wiped out
+// by the reply ("clear the list you sent" cleared the new one too).
+function setBulkLocked(locked) {
+  $("#bulk-text").readOnly = locked;
+  for (const id of ["#bulk-service", "#bulk-name", "#bulk-strip", "#clear-bulk"]) $(id).disabled = locked;
+  for (const node of document.querySelectorAll("#bulk-preview input, #bulk-preview button")) node.disabled = locked;
+  $("#bulk-preview").classList.toggle("locked", locked);
 }
 
 async function doBulkDownload() {
@@ -1274,6 +1431,8 @@ async function doBulkDownload() {
   if (!entries.length) return;
   await submitGuard.run("bulk", async () => {
     state.bulkSubmitting = true;
+    const sentRevision = bulkDraft.revision;
+    setBulkLocked(true);
     renderBulkState();
     $("#bulk-status").textContent = "Queueing…";
     try {
@@ -1295,7 +1454,11 @@ async function doBulkDownload() {
       if (res.links) parts.push(`${res.links} link${res.links === 1 ? "" : "s"}`);
       if (parts.length) toast(`Queued · ${parts.join(" + ")}`, "success");
       const held = res.held_back_urls || [];
-      if (held.length) {
+      if (bulkDraft.revision !== sentRevision) {
+        // The list changed after it was sent (it can't while locked, but never risk it):
+        // keep the newer list rather than clearing it.
+        $("#bulk-status").textContent = "Queued the list you sent — your newer changes are still here.";
+      } else if (held.length) {
         // Keep exactly the links that weren't queued, so nothing has to be pasted again.
         bulkDraft.keepOnly(held);
         $("#bulk-text").value = bulkDraft.text;
@@ -1316,6 +1479,7 @@ async function doBulkDownload() {
       }
     } finally {
       state.bulkSubmitting = false;
+      setBulkLocked(false);
       if ($("#bulk-status").textContent === "Queueing…") $("#bulk-status").textContent = "";
       renderBulkState();
     }
@@ -1549,7 +1713,7 @@ async function scanLibrary() {
   button.textContent = "Scanning...";
   $("#library-status").textContent = "Reading audio files and metadata...";
   try {
-    const r = await api("/api/library/scan", "POST", { order: $("#library-order").value });
+    const r = await api("/api/library/scan", "POST", { order: $("#library-order").value }, { timeoutMs: 0 });
     if (!r.ok) {
       $("#library-status").textContent = r.error;
       if (!state.libraryReport) {
@@ -1667,7 +1831,7 @@ async function updateYtdlp() {
   const btn = $("#update-ytdlp");
   btn.disabled = true;
   btn.textContent = "Updating…";
-  const r = await api("/api/maintenance/update-ytdlp", "POST");
+  const r = await api("/api/maintenance/update-ytdlp", "POST", undefined, { timeoutMs: 0 });
   btn.disabled = false;
   btn.textContent = "Update yt-dlp";
   if (!r.ok) { if (!r.offline) toast(r.error, "error", 7000); return; }
@@ -1713,8 +1877,9 @@ function bind() {
   $("#close-settings").onclick = closeSettings;
   $("#save-settings").onclick = saveSettings;
   $("#update-ytdlp").onclick = updateYtdlp;
-  $("#settings-modal .modal-body").addEventListener("input", () => setSettingsDirty(true));
-  $("#settings-modal .modal-body").addEventListener("change", () => setSettingsDirty(true));
+  const edited = () => { state.settingsRevision += 1; setSettingsDirty(true); };
+  $("#settings-modal .modal-body").addEventListener("input", edited);
+  $("#settings-modal .modal-body").addEventListener("change", edited);
   for (const id of ["#set-naming-order", "#set-naming-artists", "#set-format"]) {
     $(id).addEventListener("change", updateNamingPreview);
   }

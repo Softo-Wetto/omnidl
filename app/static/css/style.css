@@ -41,12 +41,12 @@ html.light {
   --border-soft: #e3e8f0;
   --text: #1a2230;
   --muted: #5a6678;
-  --dim: #66728a;
-  --accent: #3b6fe0;
+  --dim: #5c6880;
+  --accent: #2f5fcc;
   --accent-2: #7a4fe0;
-  --green: #1aa251;
-  --red: #d63a3a;
-  --yellow: #b07d0a;
+  --green: #11733a;
+  --red: #c22f2f;
+  --yellow: #876000;
   --shadow: 0 8px 28px rgba(40, 60, 100, .14);
   --term-bg: #fbfcfe;
   --term-fg: #2a3340;
@@ -983,3 +983,48 @@ html.light .badge.issues { color: #8a5d00; }
 }
 .job-note.info { color: var(--yellow); }
 html.light .job-note.info { color: #8a5d00; }
+
+/* ============================================================
+   Review 2026-10-16: summary chips, titles, phone targets, no repeated card
+   ============================================================ */
+/* The queue summary is separate chips that wrap — at 320 px "failed" used to be cut off. */
+.panel-head .summary, .panel-head .summary:not(:empty) {
+  display: flex; flex-wrap: wrap; gap: 4px; background: none; border: 0; padding: 0;
+  white-space: normal;
+}
+.sum-chip {
+  white-space: nowrap; padding: 2px 8px; border-radius: 999px; font-size: 12px;
+  color: var(--muted); background: var(--panel-2); border: 1px solid var(--border-soft);
+}
+.sum-chip.running { color: var(--accent); }
+.sum-chip.issues { color: var(--yellow); }
+.sum-chip.error { color: var(--red); font-weight: 700; }
+
+/* Long titles get room: up to three lines, with the status moving under them when tight. */
+.job-top { flex-wrap: wrap; align-items: flex-start; row-gap: 4px; }
+.job-open { flex: 1 1 12rem; }
+.job-input {
+  white-space: normal; overflow-wrap: anywhere; text-overflow: clip;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.now-title {
+  white-space: normal; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.now-head { flex-wrap: wrap; align-items: flex-start; row-gap: 4px; }
+
+/* Phones: the card above already shows the current job — don't repeat it right below. */
+@media (max-width: 760px) {
+  #active-queue .job.shown-above { display: none; }
+  #active-section.only-shown-above { display: none; }
+  /* Thumb-sized targets for the controls used most on a phone. */
+  .job-actions button, .now-actions button { min-height: 44px; padding: 8px 14px; font-size: 13px; }
+  .queue-section-head button { min-height: 40px; }
+  .history-tools select, .history-tools input { min-height: 40px; }
+  #toggle-term, #copy-log, #clear-term { min-height: 40px; }
+}
+
+/* Bulk while it's being sent: visibly not editable. */
+.bulk-preview.locked { opacity: .7; }
+#bulk-text[readonly] { opacity: .75; cursor: progress; }
+.save-btn:disabled { cursor: progress; }

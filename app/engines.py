@@ -89,6 +89,9 @@ def _tool_cmd(tool: str) -> list[str]:
         return [sys.executable, "--run-tool", tool]
     if tool == "spotdl":
         return [sys.executable, "-u", "-m", "spotdl"]
+    if tool == "scdl":
+        # Through OmniDL's wrapper, which adds the per-job file manifest (see scdl_tool).
+        return [sys.executable, "-u", str(Path(__file__).with_name("scdl_tool.py"))]
     return [_tool_path(tool)]
 
 
@@ -255,6 +258,10 @@ def soundcloud_format_note(audio_format: str) -> str:
 def _soundcloud_cmd(text: str, s: dict) -> list[str]:
     cmd = [*_tool_cmd("scdl"), "-l", text, "--path", s["output_dir"], "-c", "--addtofile"]
     cmd += _SOUNDCLOUD_FORMAT_ARGS.get(s["audio_format"], [])
+    if s.get("_produced_file"):
+        # One line per file the job ends up with, including tracks already there (see
+        # scdl_tool) — how a re-run or hosted SoundCloud playlist still offers its files.
+        cmd += ["--omnidl-manifest", s["_produced_file"]]
     return cmd
 
 
@@ -274,10 +281,15 @@ def build_command(engine: str, text: str, settings: dict) -> list[str]:
 def describe_command(argv: list[str]) -> str:
     """Printable command line with secrets redacted, for the terminal header."""
     tokens = list(argv)
+    if "--omnidl-manifest" in tokens:                 # bookkeeping, not part of the command
+        at = tokens.index("--omnidl-manifest")
+        del tokens[at:at + 2]
     if len(tokens) >= 3 and tokens[1] == "--run-tool":
         tokens = tokens[2:]
     elif tokens[:4] == [sys.executable, "-u", "-m", "spotdl"]:
         tokens = ["spotdl", *tokens[4:]]
+    elif len(tokens) >= 3 and tokens[0] == sys.executable and tokens[2].endswith("scdl_tool.py"):
+        tokens = ["scdl", *tokens[3:]]
     elif tokens and tokens[0] == sys.executable:
         tokens = ["python", *tokens[1:]]
 

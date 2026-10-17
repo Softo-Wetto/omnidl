@@ -46,9 +46,8 @@ def _run_tool() -> int:
         import yt_dlp
         sys.modules["yt_dlp.__init__"] = yt_dlp
         yt_dlp.__init__ = yt_dlp  # type: ignore[attr-defined]
-        from scdl.scdl import _main as scdl_main
-        scdl_main()
-        return 0
+        from app.scdl_tool import main as scdl_main     # adds OmniDL's per-job file manifest
+        return scdl_main(tool_args)
     sys.stderr.write(f"unknown tool: {tool}\n")
     return 2
 
