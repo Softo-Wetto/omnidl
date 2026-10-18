@@ -376,13 +376,25 @@ found — 250 tracks").
 track number, and cover art, and writes them onto the file with `mutagen` (overriding the
 YouTube source's tags) so your library shows correct artist / title / album / artwork.
 
-**File format.** Default is **opus** — YouTube's own audio codec, kept without re-encoding, so
-it's the smallest file at full source quality. Pick m4a/mp3/flac/wav/ogg in Settings if you
-prefer: the **Bitrate** setting applies whenever audio has to be converted (always for MP3).
-FLAC/WAV made from YouTube or SoundCloud audio are bigger files with no extra quality.
-**SoundCloud links** are saved as MP3 or Opus when you choose those, and lossless original
-uploads become FLAC; other formats keep SoundCloud's own file (the card shows the real
-format).
+**File format and size.** Default is **MP3** (it plays on everything) at **Balanced** quality.
+MP3 is always converted, and the **Quality & size** setting decides how big it comes out —
+measured converting YouTube audio, which is itself only about 155 kbps:
+
+| Quality | Size | A 3½-minute song |
+|---|---|---|
+| Small (variable bitrate, LAME V5) | ~1 MB a minute — like a 128 kbps MP3 | ~3.3 MB |
+| **Balanced** (V4, default) | ~1.1 MB a minute | ~3.9 MB |
+| High (V2) | ~1.4 MB a minute | ~4.9 MB |
+| Maximum (fixed 320 kbps) | ~2.4 MB a minute | ~8.4 MB |
+
+Variable bitrate spends bits only where the music needs them, so it beats a fixed rate of the same
+size; and from a ~155 kbps source, High and Maximum mostly make bigger files. The chip under the
+search box ("MP3 · Balanced · ~1.1 MB/min") shows what you'll get and opens the setting. The same
+quality is used when M4A/Ogg have to be converted; **Opus** keeps YouTube's own stream untouched
+(smallest at full source quality, but not every player supports it), and FLAC/WAV made from
+YouTube or SoundCloud are bigger files with no extra quality. **SoundCloud links** are saved as
+MP3 or Opus when you choose those, and lossless original uploads become FLAC; other formats keep
+SoundCloud's own file (the card shows the real format).
 
 ### Music library review
 
@@ -434,8 +446,8 @@ shuts it down.
 | Spotify Client ID / Secret | spotDL method | Only used if Source = spotdl. |
 | Spotify filename template | spotDL method | e.g. `{artists} - {title}.{output-ext}`. |
 | Output folder | all | Defaults to `./downloads`. Checked before saving: a path that can't be created or written to is refused next to the field, and the old setting stays. `%USERPROFILE%\Music`, `$HOME/Music` and `~\Music` are expanded and saved as the full path, so the folder that was checked is the one that's used. |
-| Audio format | all | opus (default) / m4a / mp3 / flac / wav / ogg. |
-| Bitrate | yt-dlp + spotDL | Used when audio is converted (always for MP3). `auto` = 192 kbps. |
+| Audio format | all | mp3 (default) / opus / m4a / flac / wav / ogg. |
+| Quality & size | yt-dlp + spotDL | Small / **Balanced** (default) / High (variable bitrate) or Maximum (320 kbps) — see the table above. Used whenever audio is converted (always for MP3). |
 | Only download verified matches | all matching | On by default — see [How a song is matched](#how-a-song-is-matched). |
 | Threads | spotDL method | Parallel track downloads. |
 | Trim non-music (SponsorBlock) | yt-dlp | Strip intros/outros/offtopic from music videos. |

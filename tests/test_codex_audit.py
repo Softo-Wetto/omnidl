@@ -471,7 +471,10 @@ class FormatControlTests(unittest.TestCase):
     def test_the_bitrate_setting_reaches_ytdlp(self):
         self.assertEqual("64K", self.quality(audio_format="mp3", bitrate="64k"))
         self.assertEqual("320K", self.quality(audio_format="mp3", bitrate="320k"))
-        self.assertEqual("192K", self.quality(audio_format="mp3", bitrate="auto"))
+        self.assertEqual("4", self.quality(audio_format="mp3", bitrate="auto"))      # old saved value
+        self.assertEqual("5", self.quality(audio_format="mp3", bitrate="small"))
+        self.assertEqual("4", self.quality(audio_format="mp3", bitrate="balanced"))
+        self.assertEqual("2", self.quality(audio_format="mp3", bitrate="high"))
         self.assertEqual("256K", self.quality(audio_format="m4a", bitrate="256k"))
         self.assertIsNone(self.quality(audio_format="flac", bitrate="320k"))   # lossless: no bitrate
 
@@ -505,8 +508,41 @@ class FormatControlTests(unittest.TestCase):
 
     def test_bitrate_values_are_validated(self):
         self.assertEqual("320k", settings_mod._coerce_pref("bitrate", "320K"))
-        self.assertEqual("auto", settings_mod._coerce_pref("bitrate", "9999k"))
-        self.assertEqual("auto", settings_mod._coerce_pref("bitrate", "loud"))
+        self.assertEqual("balanced", settings_mod._coerce_pref("bitrate", "9999k"))
+        self.assertEqual("balanced", settings_mod._coerce_pref("bitrate", "loud"))
+        self.assertEqual("balanced", settings_mod._coerce_pref("bitrate", "auto"))
+        self.assertEqual("small", settings_mod._coerce_pref("bitrate", "Small"))
+
+    def test_mp3_at_balanced_quality_is_the_default(self):
+        self.assertEqual(("mp3", "balanced"), (settings_mod.DEFAULTS["audio_format"], settings_mod.DEFAULTS["bitrate"]))
+        spotdl = engines.build_command("spotify", "https://open.spotify.com/track/x",
+                                       {"output_dir": "C:/out", "audio_format": "mp3", "bitrate": "balanced"})
+        self.assertEqual("4", spotdl[spotdl.index("--bitrate") + 1])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("yt-dlp"), "needs ffmpeg and yt-dlp")
+    def test_the_presets_make_variable_bitrate_mp3s_that_get_smaller(self):
+        """Converted for real (a local 20-second test signal, no network)."""
+        from mutagen.mp3 import MP3, BitrateMode
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source.wav"
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "anoisesrc=d=20:c=pink:a=0.3", "-af", "lowpass=f=12000", "-ac", "2", str(source)],
+                           check=True)
+            sizes = {}
+            for preset in ("small", "balanced", "high", "320k"):
+                out = root / preset
+                argv = engines.media_url_command(source.as_uri(), "Song", {
+                    "output_dir": str(out), "audio_format": "mp3", "bitrate": preset})
+                argv.insert(-1, "--enable-file-urls")
+                subprocess.run(argv, check=True, capture_output=True, timeout=120)
+                mp3 = MP3(out / "Song.mp3")
+                sizes[preset] = (out / "Song.mp3").stat().st_size
+                expected = BitrateMode.CBR if preset == "320k" else BitrateMode.VBR
+                self.assertEqual(expected, mp3.info.bitrate_mode, preset)
+            self.assertLess(sizes["small"], sizes["balanced"])
+            self.assertLess(sizes["balanced"], sizes["high"])
+            self.assertLess(sizes["high"], sizes["320k"])
 
 
 # ---- D11: an unusable output folder is refused, and config.json is replaced atomically ------

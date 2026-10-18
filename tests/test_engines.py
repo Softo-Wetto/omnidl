@@ -4,7 +4,8 @@ from app.engines import media_url_command
 
 
 class EngineCommandTests(unittest.TestCase):
-    def test_mp3_downloads_use_compact_high_quality_bitrate(self):
+    def test_mp3_downloads_default_to_balanced_variable_bitrate(self):
+        """Phone-sized by default: LAME -V4, about 1.1 MB a minute from YouTube audio."""
         command = media_url_command(
             "https://www.youtube.com/watch?v=abc123",
             "Artist - Track",
@@ -12,7 +13,7 @@ class EngineCommandTests(unittest.TestCase):
         )
 
         quality_index = command.index("--audio-quality")
-        self.assertEqual("192K", command[quality_index + 1])
+        self.assertEqual("4", command[quality_index + 1])
 
 
 if __name__ == "__main__":

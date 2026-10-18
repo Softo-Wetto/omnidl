@@ -105,7 +105,8 @@ def _spotify_cmd(text: str, s: dict) -> list[str]:
         "--threads", str(s.get("threads", 4)),
     ]
     if s.get("bitrate"):
-        cmd += ["--bitrate", s["bitrate"]]
+        level = _settings.audio_quality(s["bitrate"])
+        cmd += ["--bitrate", level.lower()]
     if s.get("spotify_client_id") and s.get("spotify_client_secret"):
         cmd += ["--client-id", s["spotify_client_id"],
                 "--client-secret", s["spotify_client_secret"]]
@@ -147,15 +148,13 @@ def _ytdlp_common(s: dict, youtube: bool = True) -> list[str]:
 
 
 _LOSSY_FORMATS = {"mp3", "m4a", "ogg", "opus"}
-# Used when the Bitrate setting is "auto": transparent for music, without the unexpectedly
-# large files VBR-0 ("best") makes.
-_DEFAULT_BITRATE = "192K"
 
 
-def conversion_bitrate(s: dict) -> str:
-    """The bitrate yt-dlp converts lossy audio at, from the Bitrate setting ("320k" -> "320K")."""
-    kbps = _settings.bitrate_kbps(s.get("bitrate"))
-    return f"{kbps}K" if kbps else _DEFAULT_BITRATE
+def conversion_quality(s: dict) -> str:
+    """yt-dlp's --audio-quality for the Quality setting: a variable-bitrate level for the
+    presets ("balanced" -> "4", LAME -V4 for MP3; yt-dlp scales it for AAC/Vorbis), or a
+    fixed rate ("320k" -> "320K"). See settings.QUALITY_PRESETS for what each one measures."""
+    return _settings.audio_quality(s.get("bitrate"))
 
 
 def _ytdlp_base(s: dict, out_template: str, youtube: bool = True) -> list[str]:
@@ -167,11 +166,11 @@ def _ytdlp_base(s: dict, out_template: str, youtube: bool = True) -> list[str]:
         "--newline",
         "-o", out_template,
     ]
-    # The bitrate only matters when ffmpeg converts: MP3 always, M4A/Ogg/Opus when the source
-    # is a different codec. yt-dlp copies a stream that's already in the target codec (YouTube
-    # Opus -> .opus) without touching it, so this can't inflate or degrade those.
+    # Quality only matters when ffmpeg converts: MP3 always, M4A/Ogg/Opus when the source is a
+    # different codec. yt-dlp copies a stream that's already in the target codec (YouTube Opus
+    # -> .opus) without touching it, so this can't inflate or degrade those.
     if s["audio_format"] in _LOSSY_FORMATS:
-        cmd += ["--audio-quality", conversion_bitrate(s)]
+        cmd += ["--audio-quality", conversion_quality(s)]
     if s["audio_format"] in _THUMBNAIL_OK:
         cmd.append("--embed-thumbnail")
     return cmd + _ytdlp_common(s, youtube)

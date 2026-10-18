@@ -8,7 +8,7 @@ const DEFAULT_META = {
   engines: {}, formats: ["opus", "m4a", "mp3", "flac", "wav", "ogg"],
   video_qualities: ["Best", "2160p", "1440p", "1080p", "720p", "480p", "360p"],
   video_containers: ["mp4", "mkv"], naming_orders: ["artist-title", "title-artist"],
-  naming_artists: ["all", "primary"], bitrates: ["auto", "128k", "160k", "192k", "256k", "320k"],
+  naming_artists: ["all", "primary"], bitrates: ["small", "balanced", "high", "320k"],
   soundcloud_format_notes: {}, file_ttl: 3600, local: false, remote: false,
 };
 
@@ -240,6 +240,7 @@ function updateMediaToggle(engine) {
 }
 
 function updateChip() {
+  updateQualityChip();
   const override = $("#engine").value;
   const text = $("#input").value;
   const chip = $("#detected");
@@ -1058,8 +1059,50 @@ function fmtTTL(seconds) {
   return `${mins} minutes`;
 }
 
-const BITRATE_LABELS = { auto: "Auto (192 kbps)", "128k": "128 kbps", "160k": "160 kbps",
-                         "192k": "192 kbps", "256k": "256 kbps", "320k": "320 kbps" };
+// Sizes measured converting YouTube audio (~155 kbps Opus) to MP3 — see settings.QUALITY_PRESETS.
+const QUALITY = {
+  small: { name: "Small", mbPerMin: 1.0, about: "like a 128 kbps MP3" },
+  balanced: { name: "Balanced", mbPerMin: 1.1, about: "recommended" },
+  high: { name: "High", mbPerMin: 1.4, about: "for good headphones" },
+  "320k": { name: "Maximum", mbPerMin: 2.4, about: "320 kbps" },
+};
+
+function qualityInfo(value) {
+  const preset = QUALITY[value || "balanced"];
+  if (preset) return preset;
+  const kbps = parseInt(value, 10);                     // an older fixed setting like "192k"
+  return kbps ? { name: `${kbps} kbps`, mbPerMin: Math.round(kbps * 60 / 8 / 100) / 10, about: "fixed" }
+              : QUALITY.balanced;
+}
+
+// Short enough to fit the dropdown; what each one means is in the note under it.
+const BITRATE_LABELS = new Proxy({}, {
+  get: (_target, value) => {
+    const q = qualityInfo(String(value));
+    return `${q.name} · ~${q.mbPerMin} MB/min`;
+  },
+});
+
+// Under the search box: what a download will be saved as, and roughly how big — one tap
+// opens the setting. Shown for audio; video and lossless formats say what they are instead.
+function updateQualityChip() {
+  const chip = $("#quality-chip");
+  if (!chip) return;
+  if (state.mediaType === "video" || !state.loaded) { chip.hidden = true; return; }
+  const fmt = audioFormat();
+  let text;
+  if (fmt === "mp3" || fmt === "m4a" || fmt === "ogg") {
+    const q = qualityInfo(state.settings.bitrate);
+    text = `${fmt.toUpperCase()} · ${q.name} · ~${q.mbPerMin} MB/min`;
+  } else if (fmt === "opus") {
+    text = "Opus · source quality";
+  } else {
+    text = `${fmt.toUpperCase()} · large files`;
+  }
+  chip.textContent = text;
+  chip.setAttribute("aria-label", `${text}. Change quality and size in Settings`);
+  chip.hidden = false;
+}
 
 function loadSettingsForm() {
   const s = state.settings;
@@ -1089,7 +1132,7 @@ function loadSettingsForm() {
   $("#set-sponsorblock").checked = !!s.sponsorblock;
   $("#set-skip-existing").checked = s.skip_existing !== false;
   fillSelect($("#set-format"), state.meta.formats, s.audio_format);
-  fillSelect($("#set-bitrate"), state.meta.bitrates, s.bitrate || "auto", BITRATE_LABELS);
+  fillSelect($("#set-bitrate"), state.meta.bitrates, s.bitrate || "balanced", BITRATE_LABELS);
   fillSelect($("#set-video-container"), state.meta.video_containers, s.video_container || "mp4");
   fillSelect($("#set-naming-order"), state.meta.naming_orders, s.naming_order || "artist-title",
              { "artist-title": "Artist - Title", "title-artist": "Title - Artist" });
@@ -1139,12 +1182,19 @@ function updateFormatNotes() {
   const fmt = $("#set-format").value;
   const notes = [];
   if (fmt === "opus") notes.push("Opus is YouTube's own audio, saved without re-encoding — the smallest file at full source quality.");
-  if (fmt === "m4a") notes.push("M4A keeps YouTube's AAC stream when there is one, otherwise converts at the bitrate below.");
-  if (fmt === "mp3") notes.push("MP3 is always converted, at the bitrate below.");
+  if (fmt === "m4a") notes.push("M4A keeps YouTube's AAC stream when there is one, otherwise converts at the quality below.");
+  if (fmt === "mp3") {
+    const q = qualityInfo($("#set-bitrate").value);
+    notes.push(`MP3 plays on every phone and car stereo. At ${q.name} a 3½-minute song is about ` +
+               `${(q.mbPerMin * 3.5).toFixed(1)} MB. Balanced is recommended for phones; Small matches a ` +
+               "128 kbps MP3; Maximum is a fixed 320 kbps.");
+  }
   if (fmt === "flac" || fmt === "wav") {
-    notes.push(`${fmt.toUpperCase()} from YouTube or SoundCloud is made from compressed audio: a bigger file, no extra quality. The bitrate doesn't apply.`);
+    notes.push(`${fmt.toUpperCase()} from YouTube or SoundCloud is made from compressed audio: a bigger file, no extra quality. The quality setting doesn't apply.`);
   } else {
-    notes.push("Bitrate is only used when audio has to be converted; a stream that's already in the chosen format is kept as it is.");
+    notes.push("YouTube's own audio is only about 155 kbps, so Balanced keeps what's there for most " +
+               "listening on earbuds and phone speakers; High and Maximum make bigger files without adding " +
+               "detail the source doesn't have. Variable bitrate spends bits only where the music needs them.");
   }
   const sc = (state.meta.soundcloud_format_notes || {})[fmt];
   if (sc) notes.push(sc);
@@ -1884,6 +1934,11 @@ function bind() {
     $(id).addEventListener("change", updateNamingPreview);
   }
   $("#set-format").addEventListener("change", updateFormatNotes);
+  $("#set-bitrate").addEventListener("change", updateFormatNotes);
+  $("#quality-chip").onclick = () => {
+    openSettings();
+    $("#set-bitrate").focus();
+  };
   $("#set-output-dir").addEventListener("input", clearFieldError);
   $("#close-library").onclick = closeLibrary;
   $("#scan-library").onclick = scanLibrary;

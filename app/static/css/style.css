@@ -1028,3 +1028,12 @@ html.light .job-note.info { color: #8a5d00; }
 .bulk-preview.locked { opacity: .7; }
 #bulk-text[readonly] { opacity: .75; cursor: progress; }
 .save-btn:disabled { cursor: progress; }
+
+/* "MP3 · Balanced · ~1.1 MB/min" under the search box — opens the quality setting. */
+.quality-chip {
+  margin-left: auto; padding: 4px 10px; min-height: 28px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap;
+  background: var(--panel-2); border: 1px solid var(--border-soft);
+}
+.quality-chip:hover { color: var(--text); border-color: var(--accent); transform: none; }
+@media (max-width: 760px) { .quality-chip { margin-left: 0; min-height: 36px; } }

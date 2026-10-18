@@ -92,9 +92,17 @@ VIDEO_QUALITIES = ["Best", "2160p", "1440p", "1080p", "720p", "480p", "360p"]
 # odd/unusual codecs (it can hold almost anything without re-encoding).
 VIDEO_CONTAINERS = ["mp4", "mkv"]
 BROWSERS = ["none", "chrome", "firefox", "edge", "brave", "chromium", "opera", "vivaldi"]
-# Bitrate used whenever audio has to be converted (always for MP3; M4A/Ogg/Opus only when the
-# source is another codec). "auto" = 192 kbps. Lossless formats and copied streams ignore it.
-BITRATES = ["auto", "128k", "160k", "192k", "256k", "320k"]
+# Quality (and so size) of converted audio — always for MP3; for M4A/Ogg/Opus only when the
+# source is another codec; lossless formats and copied streams ignore it. The presets are
+# LAME variable-bitrate levels, measured on YouTube audio (Opus at ~155 kbps, the usual
+# source): small (V5) ~128 kbps, 0.96 MB a minute — the size of a typical 128 kbps MP3;
+# balanced (V4) ~148 kbps, 1.1 MB a minute; high (V2) ~185 kbps, 1.4 MB a minute. Variable
+# bitrate spends bits on the passages that need them, so it beats a fixed rate of the same
+# size. A fixed 320 kbps is still offered, but from a ~155 kbps source it only makes files
+# bigger (2.4 MB a minute). Older saved values ("192k", "auto") keep working.
+QUALITY_PRESETS = {"small": "5", "balanced": "4", "high": "2"}
+BITRATES = ["small", "balanced", "high", "320k"]
+DEFAULT_QUALITY = "balanced"
 _BITRATE_RE = re.compile(r"^\s*(\d{2,3})\s*k?\s*$", re.IGNORECASE)
 
 
@@ -108,8 +116,21 @@ def bitrate_kbps(value: Any) -> int:
 
 
 def _coerce_bitrate(value: Any) -> str:
+    preset = str(value or "").strip().lower()
+    if preset in QUALITY_PRESETS:
+        return preset
     kbps = bitrate_kbps(value)
-    return f"{kbps}k" if kbps else "auto"
+    return f"{kbps}k" if kbps else DEFAULT_QUALITY
+
+
+def audio_quality(value: Any) -> str:
+    """What to pass as yt-dlp's --audio-quality: a VBR level ("4") for a preset, "<n>K" for a
+    fixed bitrate. spotDL's --bitrate takes the same levels (as digits) and "<n>k" rates."""
+    preset = str(value or "").strip().lower()
+    if preset in QUALITY_PRESETS:
+        return QUALITY_PRESETS[preset]
+    kbps = bitrate_kbps(value)
+    return f"{kbps}K" if kbps else QUALITY_PRESETS[DEFAULT_QUALITY]
 
 # How downloaded files are named. This is a compatibility setting, not a cosmetic one:
 # a library built as "Artist - Title" gains a silent duplicate for every track saved as
@@ -125,8 +146,10 @@ DEFAULTS: dict[str, Any] = {
     "output_dir": str(DEFAULT_OUTPUT),
     # opus is YouTube's native audio codec -> remuxed without re-encoding: ~half the size
     # of a 320k mp3 at full source quality. mp3/m4a/flac still selectable in Settings.
-    "audio_format": "opus",
-    "bitrate": "auto",
+    # MP3 plays on everything; "balanced" keeps it phone-sized (about 1.1 MB a minute) while
+    # sounding the same as the YouTube source. Opus/M4A/FLAC are still in Settings.
+    "audio_format": "mp3",
+    "bitrate": DEFAULT_QUALITY,
     # Download mode for YouTube / pasted links: "audio" (extract audio) or "video"
     # (full video, merged to mp4). Spotify & SoundCloud always download audio.
     "media_type": "audio",

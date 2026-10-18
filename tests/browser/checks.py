@@ -812,6 +812,19 @@ async def review_1016(cdp):
           f"{preparing!r} {stayed} {toasts!r}")
     cdp.release_rules()
 
+    # The quality chip says what a download is saved as, and opens the setting.
+    await load(cdp)
+    await cdp.eval("const f = document.querySelector('#format'); f.value = 'mp3'; f.dispatchEvent(new Event('change'))")
+    chip = await cdp.eval("document.querySelector('#quality-chip').textContent")
+    await cdp.eval("document.querySelector('#quality-chip').click()")
+    await settle(cdp, 300)
+    focused = await cdp.eval("document.activeElement.id")
+    labels = await cdp.eval("[...document.querySelectorAll('#set-bitrate option')].map(o => o.textContent)")
+    check("UI the quality chip shows format and size, and opens the quality setting",
+          chip.startswith("MP3 · ") and "MB/min" in chip and focused == "set-bitrate" and len(labels) == 4,
+          f"{chip!r} {focused} {labels}")
+    await cdp.escape()
+
 
 async def main():
     build_sandbox()
