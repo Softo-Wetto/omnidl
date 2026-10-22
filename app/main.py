@@ -177,6 +177,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        manager.owners.flush(force=True)          # which file holds which recording
         if keep_awake:
             keep_awake.stop()
         if running_tunnel:
@@ -1007,6 +1008,7 @@ async def instance_shutdown(request: Request):
         if job.status in ("running", "queued"):
             await manager.cancel(job.id, _sid(request))
     manager._persist()
+    manager.owners.flush(force=True)
     # An open dashboard tab holds a live connection, and uvicorn's graceful shutdown waited on
     # it indefinitely — one tab left open blocked a restart. Close them first, as "service
     # restart" (1012), so the tabs reconnect to the new instance by themselves.

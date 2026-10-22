@@ -329,6 +329,7 @@ class DeliverableFilesTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_track_that_already_existed_is_part_of_the_jobs_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = make_audio(Path(tmp) / "Nova - Midnight Run.opus")
+            JobManager._tag(target, Track("Nova", "Midnight Run"))     # as OmniDL saves every song
             job = Job("x", "youtube", None, "", settings={"output_dir": tmp, "audio_format": "opus"})
             result = await JobManager()._fetch_track(job, Track("Nova", "Midnight Run"), job.settings, True, 1, 1)
             job.status = "done"

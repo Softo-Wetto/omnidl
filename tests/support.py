@@ -1,6 +1,7 @@
 """Shared test helpers: fake downloads that behave like yt-dlp, and real (tiny) audio files."""
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +11,9 @@ import network_guard  # noqa: F401  — no test using these helpers can reach th
 
 _TEMPLATES: dict[str, Path] = {}
 _TEMPLATE_DIR = Path(tempfile.mkdtemp(prefix="omnidl-test-audio-"))
+# Which-file-holds-which-recording records (app/provenance.py) go to a throwaway file, never
+# the real provenance.json beside config.json.
+os.environ["OMNIDL_PROVENANCE"] = str(_TEMPLATE_DIR / "provenance.json")
 
 
 def output_of(argv: list[str]) -> Path:

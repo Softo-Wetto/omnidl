@@ -18,9 +18,11 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from . import bulk_input, candidate_search, engines
 from .library import STAGING_DIR, build_library_index, _normalise
 from .matching import MatchDecision, choose, same_recording
+from .provenance import Provenance, same_song, tag_names, tag_urls
+from .ytdlp_tool import source_key
 from .review_report import TrackOutcome, write_review_report
 from . import settings as settings_mod
-from .settings import DOWNLOAD_ROOT, FILE_TTL_SECONDS, PROJECT_ROOT, load_settings
+from .settings import DOWNLOAD_ROOT, FILE_TTL_SECONDS, LEGACY_DOWNLOAD_ROOT, PROJECT_ROOT, load_settings
 from .spotify_resolver import Track
 
 # How many jobs run concurrently. Each job may itself spawn several track downloads, so
@@ -139,6 +141,67 @@ def _finished_files_under(root: Path) -> list[Path]:
     return sorted(found)
 
 
+def _is_link(path: Path) -> bool:
+    """A symlink, or a Windows junction (which is_symlink() doesn't report)."""
+    try:
+        return path.is_symlink() or bool(getattr(path, "is_junction", lambda: False)())
+    except OSError:
+        return True
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+# The file that says "OmniDL made this folder for this hosted job". Cleanup deletes nothing
+# without it: being under the download root is no proof — that root used to be the library
+# folder too, and a local install started in hosted mode lost its Artist/Album folders.
+_JOB_MARKER = ".omnidl-job"
+_JOB_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# A download's own working folder inside the hidden staging folder: a link job's, or one track's.
+_STAGE_NAME_RE = re.compile(r"^[0-9a-f]{12}(?:-\d+)?$")
+
+
+def _hosted_roots() -> list[Path]:
+    roots = [DOWNLOAD_ROOT]
+    if not _same_path(LEGACY_DOWNLOAD_ROOT, DOWNLOAD_ROOT):
+        roots.append(LEGACY_DOWNLOAD_ROOT)
+    return roots
+
+
+def _mark_hosted_job(folder: Path, job_id: str, how: str = "created") -> bool:
+    try:
+        (folder / _JOB_MARKER).write_text(
+            json.dumps({"omnidl": "hosted-job", "job": job_id, "session": folder.parent.name, "how": how}),
+            encoding="utf-8")
+        return True
+    except OSError as exc:
+        print(f"[OmniDL] Couldn't mark {folder} as a hosted job's folder ({exc}); "
+              "it won't be cleaned up automatically.")
+        return False
+
+
+def _owned_job_dir(folder: Path, job_id: str | None = None) -> bool:
+    """Proof that OmniDL made `folder` as a hosted job's temporary folder, so it may delete it:
+    it is <hosted root>/<session>/<job id>, neither it nor its session folder is a link, and it
+    holds the marker naming that job and session. Anything else — an album, a folder someone
+    put there, a name that merely looks like a job ID — is left alone."""
+    try:
+        marker = folder / _JOB_MARKER
+        if not marker.is_file() or _is_link(marker) or _is_link(folder) or _is_link(folder.parent):
+            return False
+        if not _JOB_ID_RE.match(folder.name) or (job_id is not None and folder.name != job_id):
+            return False
+        root = next((r for r in _hosted_roots() if _same_path(folder.parent.parent, r)), None)
+        if root is None or not _inside(folder, root):
+            return False
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (isinstance(data, dict) and data.get("omnidl") == "hosted-job"
+            and data.get("job") == folder.name and data.get("session") == folder.parent.name)
+
+
 def _make_hidden_dir(path: Path) -> None:
     """Create the staging folder, hidden on Windows (a leading dot only hides it elsewhere),
     so it doesn't flash up in your music folder while a song downloads."""
@@ -157,12 +220,12 @@ class _OutputClaims:
     Duplicate rows in one list, or the same song in two playlists running side by side, used
     to both see "no file yet" and run converters onto the same name. A claim is held from the
     existing-file check until the finished file is in place, so the second one waits and then
-    finds the first one's file.
+    finds the first one's file. Matched songs and link downloads claim the same way, so neither
+    can write a name the other is filling. Which recording ends up there is kept in Provenance.
     """
 
     def __init__(self) -> None:
         self._locks: dict[str, list] = {}           # key -> [lock, users]
-        self.written_by: dict[str, tuple[str, str]] = {}   # key -> identity of the track saved there
 
     @staticmethod
     def key(path: Path) -> str:
@@ -183,7 +246,62 @@ class _OutputClaims:
 
 
 def _identity(track) -> tuple[str, str]:
+    """A loose artist/title key for a track (accents and punctuation folded). Not used to decide
+    whether a file holds a song — see provenance.same_song — since it folds "A/B" into "a b"."""
     return _normalise(getattr(track, "all_artists", "") or track.artist), _normalise(track.title)
+
+
+def _requested_as(s: dict) -> str:
+    """What a link job was asked to save as, e.g. "audio:mp3" — a recording saved as MP3
+    doesn't satisfy a request for Opus."""
+    if s.get("media_type") == "video":
+        return f"video:{s.get('video_container') or 'mp4'}"
+    return f"audio:{s.get('audio_format') or 'opus'}"
+
+
+def _read_manifest(path: str | None, offset: int = 0) -> tuple[list[dict], int]:
+    """New entries in a staged link job's manifest (one JSON object per line) from byte
+    `offset`, and where the next read starts. Only whole lines are taken — the downloader may be
+    mid-write. A bare path on a line is a file with no source information."""
+    if not path:
+        return [], offset
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            data = handle.read()
+    except OSError:
+        return [], offset
+    end = data.rfind(b"\n") + 1
+    entries: list[dict] = []
+    for line in data[:end].decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line) if line.startswith("{") else {"filepath": line}
+        except ValueError:
+            continue
+        if isinstance(entry, dict):
+            entries.append(entry)
+    return entries, offset + end
+
+
+def _move_new(src: Path, dest: Path) -> None:
+    """Move `src` to `dest`, never replacing a file already there (FileExistsError instead)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dest)                       # fails if dest exists, on every platform
+    except FileExistsError:
+        raise
+    except OSError:
+        if sys.platform != "win32" and dest.exists():
+            raise FileExistsError(str(dest))
+        os.rename(src, dest)                     # no hard links here; Windows' rename won't overwrite
+        return
+    try:
+        src.unlink()          # dest is already complete; the staging cleanup retries a held file
+    except OSError:
+        pass
 
 
 def _produced_list_path(job_id: str) -> Path:
@@ -645,6 +763,9 @@ class JobManager:
         self._submit_times: dict[str, list[float]] = {}  # session -> recent submit times
         self._ip_times: dict[str, list[float]] = {}      # client IP -> recent submit times
         self._claims = _OutputClaims()
+        # Which recording each saved file holds, across restarts (see provenance.py).
+        self.owners = Provenance()
+        self._manifest_pos: dict[str, int] = {}   # link job -> how far its manifest was read
         # YouTube rate limits are per connection/account, not per job: when one job is told to
         # slow down, every job waits (was per job, so a second playlist kept hammering).
         self.pause_until = 0.0
@@ -654,6 +775,8 @@ class JobManager:
     def start(self) -> None:
         if not self._worker_tasks:
             self._load_history()
+            self._adopt_hosted_folders()
+            self._sweep_stale_staging()
             self._worker_tasks = [asyncio.create_task(self._worker()) for _ in range(_WORKER_COUNT)]
             self._cleanup_task = asyncio.create_task(self._cleanup_loop())
 
@@ -794,14 +917,16 @@ class JobManager:
         if settings_mod.LOCAL_MODE:
             # Personal mode: write straight to the user's configured folder. out_dir stays
             # None so nothing here is ever auto-deleted (it's the user's library).
-            out_dir = Path(s.get("output_dir") or DOWNLOAD_ROOT)
+            out_dir = Path(s.get("output_dir") or settings_mod.DEFAULT_OUTPUT)
         else:
             # Hosted mode: each job gets its own isolated folder, so we know exactly which
             # files it produced and can hand only those to the visitor who created it.
-            out_dir = DOWNLOAD_ROOT / session / job.id
+            out_dir = DOWNLOAD_ROOT / (session or "anonymous") / job.id
             job.out_dir = out_dir
         try:
             out_dir.mkdir(parents=True, exist_ok=True)
+            if job.out_dir is not None:
+                _mark_hosted_job(out_dir, job.id)    # what later lets cleanup delete it
         except OSError:
             pass
         s["output_dir"] = str(out_dir)
@@ -911,6 +1036,11 @@ class JobManager:
                 # option through). Exact even with other jobs writing alongside, unlike
                 # comparing the folder before and after, which missed re-runs entirely.
                 s["_produced_file"] = str(_produced_list_path(job.id))
+                # Downloads land in this job's own staging folder and are filed into the output
+                # folder afterwards, each under a name no other recording holds; recordings the
+                # folder already has (by source ID) are listed for the downloader to skip.
+                s["_stage_dir"] = str(Path(s["output_dir"]) / STAGING_DIR / job.id)
+                s["_known_file"] = str(_produced_list_path(job.id).with_suffix(".known.json"))
             job.argv = engines.build_command(engine, input_text, s)
             job.display_cmd = engines.describe_command(job.argv)
 
@@ -942,9 +1072,16 @@ class JobManager:
         return True
 
     @staticmethod
-    def _remove_files(job: Job) -> None:
-        if job.out_dir and job.out_dir.exists():
-            shutil.rmtree(job.out_dir, ignore_errors=True)
+    def _remove_files(job: Job) -> bool:
+        """Delete a hosted job's own folder — only if it provably is one (see _owned_job_dir)."""
+        if not (job.out_dir and job.out_dir.exists() and _owned_job_dir(job.out_dir, job.id)):
+            return False
+        shutil.rmtree(job.out_dir, ignore_errors=True)
+        try:
+            job.out_dir.parent.rmdir()        # the visitor's folder, once their last job is gone
+        except OSError:
+            pass
+        return True
 
     async def _cleanup_loop(self) -> None:
         """Delete finished jobs' files once they age out, to bound disk use."""
@@ -957,35 +1094,103 @@ class JobManager:
         for job in list(self.jobs.values()):
             if job.status in ("done", "error", "cancelled") and job.finished \
                     and now - job.finished > FILE_TTL_SECONDS:
-                if job.out_dir and job.out_dir.exists():
-                    self._remove_files(job)
+                if job.out_dir and job.out_dir.exists() and self._remove_files(job):
                     await self._send(job, {"type": "status", "job": job.to_dict()})
         self._reap_orphans(now)
+        self.owners.prune()                   # forget files that were deleted
 
     def _reap_orphans(self, now: float) -> None:
-        """Hosted only: delete per-job folders no job refers to any more (history trimmed, a
-        crash before it was saved) once they're older than the file TTL. Never touches a local
-        install, where the output folder is the user's music library."""
-        if settings_mod.LOCAL_MODE or not DOWNLOAD_ROOT.is_dir():
+        """Hosted only: delete job folders no job refers to any more (history trimmed, a crash
+        before it was saved) once they're older than the file TTL.
+
+        Only folders carrying OmniDL's hosted-job marker are candidates. Everything else under
+        the root — a library's Artist/Album folders, anything put there by hand — is never
+        touched, however old. Never runs on a local install at all.
+        """
+        if settings_mod.LOCAL_MODE:
             return
-        known = {os.path.normcase(str(j.out_dir.resolve())) for j in self.jobs.values() if j.out_dir}
-        try:
-            sessions = [d for d in DOWNLOAD_ROOT.iterdir() if d.is_dir() and not d.is_symlink()]
-        except OSError:
-            return
-        for session_dir in sessions:
+        known = {os.path.normcase(os.path.abspath(j.out_dir)) for j in self.jobs.values() if j.out_dir}
+        for root in _hosted_roots():
             try:
-                job_dirs = [d for d in session_dir.iterdir() if d.is_dir() and not d.is_symlink()]
+                sessions = [d for d in root.iterdir() if d.is_dir() and not _is_link(d)]
             except OSError:
                 continue
-            for job_dir in job_dirs:
+            for session_dir in sessions:
                 try:
-                    if (os.path.normcase(str(job_dir.resolve())) not in known
-                            and now - job_dir.stat().st_mtime > FILE_TTL_SECONDS
-                            and _inside(job_dir, DOWNLOAD_ROOT)):
-                        shutil.rmtree(job_dir, ignore_errors=True)
+                    job_dirs = [d for d in session_dir.iterdir() if d.is_dir() and not _is_link(d)]
                 except OSError:
-                    pass
+                    continue
+                removed = False
+                for job_dir in job_dirs:
+                    try:
+                        if (os.path.normcase(os.path.abspath(job_dir)) not in known
+                                and _owned_job_dir(job_dir)
+                                and now - job_dir.stat().st_mtime > FILE_TTL_SECONDS):
+                            shutil.rmtree(job_dir, ignore_errors=True)
+                            removed = True
+                    except OSError:
+                        pass
+                if removed:
+                    try:
+                        session_dir.rmdir()
+                    except OSError:
+                        pass
+
+    @staticmethod
+    def _sweep_stale_staging(output_dir: Path | None = None) -> None:
+        """Local, on start: clear the working folders a crash left in the library's hidden
+        staging folder — only ones named for a job ("<job id>" or "<job id>-<track>") and
+        untouched for a day. Finished link downloads were already filed as they finished, so
+        all that's left there is half-downloaded audio."""
+        if not settings_mod.LOCAL_MODE:
+            return
+        try:
+            out = Path(output_dir or load_settings().get("output_dir") or settings_mod.DEFAULT_OUTPUT)
+            staging = out / STAGING_DIR
+            if not staging.is_dir() or _is_link(staging):
+                return
+            cutoff = time.time() - 86400
+            for entry in staging.iterdir():
+                if (_STAGE_NAME_RE.match(entry.name) and entry.is_dir() and not _is_link(entry)
+                        and entry.stat().st_mtime < cutoff):
+                    shutil.rmtree(entry, ignore_errors=True)
+            staging.rmdir()                           # only if that emptied it
+        except Exception:  # noqa: BLE001 — housekeeping must never stop OmniDL starting
+            pass
+
+    def _adopt_hosted_folders(self) -> None:
+        """Hosted only, on start: mark the folders of jobs in the history that predate the
+        marker, so they still expire. Only a folder at exactly <root>/<session>/<job id> for a
+        job the history says OmniDL created there qualifies; old folders no job refers to are
+        reported, never deleted — look at them and remove them yourself."""
+        if settings_mod.LOCAL_MODE:
+            return
+        for job in self.jobs.values():
+            folder = job.out_dir
+            if (folder is None or not folder.is_dir() or (folder / _JOB_MARKER).exists()
+                    or _is_link(folder) or _is_link(folder.parent) or folder.name != job.id
+                    or not _JOB_ID_RE.match(job.id) or folder.parent.name != (job.session or "anonymous")):
+                continue
+            if any(_same_path(folder.parent.parent, root) and _inside(folder, root) for root in _hosted_roots()):
+                _mark_hosted_job(folder, job.id, how="history")
+        known = {os.path.normcase(os.path.abspath(j.out_dir)) for j in self.jobs.values() if j.out_dir}
+        leftovers = 0
+        for root in _hosted_roots():
+            try:
+                for session_dir in root.iterdir():
+                    if not session_dir.is_dir() or _is_link(session_dir):
+                        continue
+                    children = [d for d in session_dir.iterdir() if d.is_dir()]
+                    if children and all(_JOB_ID_RE.match(d.name) for d in children):
+                        leftovers += sum(1 for d in children if not (d / _JOB_MARKER).exists()
+                                         and os.path.normcase(os.path.abspath(d)) not in known)
+            except OSError:
+                continue
+        if leftovers:
+            print(f"[OmniDL] {leftovers} old download folder(s) under "
+                  f"{', '.join(str(r) for r in _hosted_roots())} aren't linked to any job, so they "
+                  "won't be cleaned up automatically. Check and delete them yourself if they're "
+                  "leftover hosted downloads.")
 
     # ----- internals -----------------------------------------------------
     def _kill(self, job: Job) -> None:
@@ -1129,9 +1334,27 @@ class JobManager:
                 await self._run_tracklist_job(job)
             else:
                 await self._emit(job, f"\r\n\x1b[1;36m$ {job.display_cmd}\x1b[0m\r\n")
-                before = _audio_snapshot(job) if job.out_dir is None else None
-                job.code = await self._stream_subprocess(job, job.argv)
-                job.produced.extend(_collect_produced(job, before))
+                staged = bool(job.settings.get("_stage_dir"))
+                filing = done = None
+                if staged:
+                    self._write_known(job)
+                    _make_hidden_dir(Path(job.settings["_stage_dir"]).parent)
+                    Path(job.settings["_stage_dir"]).mkdir(parents=True, exist_ok=True)
+                    # Each file is filed as soon as the downloader reports it, so a playlist's
+                    # songs appear one by one — and survive a crash part-way through.
+                    done = asyncio.Event()
+                    filing = asyncio.create_task(self._file_while_running(job, done))
+                before = _audio_snapshot(job) if job.out_dir is None and not staged else None
+                try:
+                    job.code = await self._stream_subprocess(job, job.argv)
+                finally:
+                    # Whatever finished is filed, even from a run that failed or was cancelled.
+                    if staged:
+                        done.set()
+                        await filing                 # lets a file being moved finish, never cut short
+                        await self._settle_staged(job)
+                    else:
+                        job.produced.extend(_collect_produced(job, before))
                 if job.status != "cancelled":
                     job.status = "done" if job.code == 0 else "error"
                     if job.status == "done":
@@ -1147,12 +1370,165 @@ class JobManager:
             if job.status == "error" and not job.note:
                 job.note = _failure_note(job.output)
             job.procs.clear()
+            self.owners.flush(force=True)
             colour = {"done": "32", "cancelled": "33", "error": "31"}.get(job.status, "0")
             await self._emit(
                 job, f"\x1b[{colour}m[{job.status}] exit={job.code}\x1b[0m\r\n"
             )
             await self._send(job, {"type": "status", "job": job.to_dict()})
             self._persist()
+
+    # ----- link jobs: staged downloads filed by recording -----------------
+    def _write_known(self, job: Job) -> None:
+        """Tell the downloader which recordings the output folder already has (source -> file),
+        so a re-run skips them by ID rather than by a title another video might share."""
+        path = job.settings.get("_known_file")
+        if not path:
+            return
+        known: dict[str, str] = {}
+        if job.settings.get("skip_existing", True):
+            out_dir = Path(job.settings["output_dir"])
+            for source, file in self.owners.links_in(out_dir, _requested_as(job.settings)).items():
+                if _usable_media(Path(file)):
+                    known[source] = file
+        try:
+            Path(path).write_text(json.dumps(known), encoding="utf-8")
+        except OSError:
+            pass
+
+    # How often a running link job's newly finished files are filed (seconds).
+    _FILE_EVERY = 1.0
+
+    async def _file_while_running(self, job: Job, done: asyncio.Event) -> None:
+        while not done.is_set():
+            try:
+                await asyncio.wait_for(done.wait(), self._FILE_EVERY)
+            except asyncio.TimeoutError:
+                try:
+                    await self._file_reported(job)
+                except Exception as exc:  # noqa: BLE001 — the final pass after the run tries again
+                    print(f"[OmniDL] Filing {job.id}'s downloads hit a problem: {exc}")
+
+    async def _settle_staged(self, job: Job) -> None:
+        """After the downloader exits: file whatever is still waiting, then remove the staging
+        folder (half-finished downloads with it) and the job's bookkeeping files."""
+        s = job.settings
+        try:
+            await self._file_reported(job)
+        finally:
+            self._manifest_pos.pop(job.id, None)
+            stage = Path(s["_stage_dir"])
+            shutil.rmtree(stage, ignore_errors=True)
+            try:
+                stage.parent.rmdir()                  # the staging folder, once nothing's in it
+            except OSError:
+                pass
+            for key in ("_produced_file", "_known_file"):
+                if s.get(key):
+                    Path(s[key]).unlink(missing_ok=True)
+
+    async def _file_reported(self, job: Job) -> None:
+        """File the downloads the manifest reported since the last look into the output folder.
+
+        Each one goes under its own title unless a different recording already holds that name,
+        in which case it becomes "Title (2)" — the other file is never replaced or taken for
+        this one. The same recording already there (a re-run, or another job that just saved
+        it) is reused.
+        """
+        s = job.settings
+        stage = Path(s["_stage_dir"])
+        out_dir = Path(s["output_dir"])
+        flat = job.engine != "soundcloud"           # scdl keeps playlist tracks in a subfolder
+        want = _requested_as(s)
+        replace = not s.get("skip_existing", True)
+        entries, self._manifest_pos[job.id] = _read_manifest(s.get("_produced_file"),
+                                                             self._manifest_pos.get(job.id, 0))
+        for entry in entries:
+            try:
+                if entry.get("existing"):
+                    path = Path(entry["existing"])
+                    if _inside(path, out_dir) and path.is_file():
+                        job.produced.append(str(path))
+                    continue
+                staged = Path(entry.get("filepath") or "")
+                if not staged.is_file() or not _inside(staged, stage):
+                    continue
+                parts = staged.resolve().relative_to(stage.resolve()).parts
+                folder = out_dir if flat or len(parts) == 1 else out_dir.joinpath(*parts[:-1])
+                source = entry.get("source") or source_key(entry)
+                placed, how = await self._file_link_download(job, staged, folder, source, entry, want, replace)
+                if placed is None:
+                    await self._emit(job, f"\x1b[31m✗ couldn't save {staged.name}: every name for it "
+                                          "is taken by other recordings\x1b[0m\r\n")
+                    continue
+                job.produced.append(str(placed))
+                if how == "kept":
+                    await self._emit(job, f"\x1b[33m⏭ already downloaded:\x1b[0m {placed.name}\r\n")
+                elif placed.name != staged.name:
+                    await self._emit(job, f"\x1b[33m↪ saved as \"{placed.name}\"\x1b[0m \x1b[2m(a different "
+                                          f"recording already has the name \"{staged.name}\")\x1b[0m\r\n")
+            except Exception as exc:  # noqa: BLE001 — one file that can't be filed mustn't stop the rest
+                await self._emit(job, f"\x1b[31m[error] couldn't file {entry.get('filepath') or entry}: "
+                                      f"{exc}\x1b[0m\r\n")
+
+    async def _file_link_download(self, job: Job, staged: Path, folder: Path, source: str,
+                                  entry: dict, want: str, replace: bool) -> tuple[Path | None, str]:
+        """Put one staged link download in `folder`. Returns (path, "new" | "replaced" | "kept")."""
+        record = {"kind": "link", "source": source, "title": entry.get("title"),
+                  "url": entry.get("webpage_url") or entry.get("original_url"), "as": want, "job": job.id}
+        for n in range(1, 100):
+            target = folder / (staged.name if n == 1 else f"{staged.stem} ({n}){staged.suffix}")
+            async with self._claims.claim(target):
+                if not target.exists():
+                    try:
+                        await asyncio.to_thread(_move_new, staged, target)
+                    except FileExistsError:
+                        continue                       # appeared from outside OmniDL just now
+                    self.owners.record(target, **record)
+                    return target, "new"
+                if await asyncio.to_thread(self._holds_link, target, source, record["url"]):
+                    usable = await asyncio.to_thread(_usable_media, target)
+                    if replace or not usable:
+                        # Asked for a fresh copy (or the old one is broken, kept aside).
+                        await asyncio.to_thread(self._publish, staged, target, None if usable else target)
+                        self.owners.record(target, **record)
+                        return target, "replaced"
+                    staged.unlink(missing_ok=True)
+                    self.owners.record(target, **record)
+                    return target, "kept"
+            # A different recording, or one that can't be told, has this name: try the next.
+        return None, ""
+
+    def _song_holder(self, target: Path, track) -> str:
+        """Whose file is at a matched song's name: "free" (nothing usable there), "same" (this
+        song) or "other" (a different recording — or one that can't be told, which is kept and
+        never taken for this song).
+
+        A filename isn't enough: "A/B - Song" and "A_B - Song" are both saved as "A_B - Song".
+        OmniDL used to remember who wrote each name only until it restarted. Now: a file the
+        lasting record says came from a pasted link is never a matched song; otherwise the
+        file's own artist/title tags decide (they say what it holds now, even if someone
+        retagged it), and the record stands in for tags a format couldn't keep.
+        """
+        if not target.exists():
+            return "free"
+        rec = self.owners.get(target)
+        if rec is not None and rec.get("kind") == "link":
+            return "other"                    # a pasted link's download, not a verified match
+        artist, title = tag_names(target)
+        if not (artist and title) and rec is not None and rec.get("kind") == "track":
+            artist, title = rec.get("artists", ""), rec.get("title", "")
+        if artist and title:
+            return "same" if same_song(artist, title, track.all_artists, track.title) else "other"
+        return "free" if _media_length(target) is None else "other"
+
+    def _holds_link(self, target: Path, source: str, url: str | None) -> bool:
+        """Is `target` this link's recording? By OmniDL's record, else (for a file saved
+        before records were kept) by the page address yt-dlp/scdl embedded in its tags."""
+        rec = self.owners.get(target)
+        if rec is not None:
+            return rec.get("kind") == "link" and rec.get("source") == source
+        return bool(url) and url in tag_urls(target)
 
     async def _run_tracklist_job(self, job: Job) -> None:
         """Download a list of known tracks, taking only strict external matches.
@@ -1415,41 +1791,50 @@ class JobManager:
         if detailed:
             await self._emit(job, f"\r\n{label}\r\n")
 
-        identity = _identity(track)
         attempt_name = 1
+        elsewhere: set[str] = set()       # files under names this song passed over
         while True:
             name = basename if attempt_name == 1 else f"{basename} ({attempt_name})"
             target = out_dir / f"{name}.{ext}"
             # One writer per output file across every job (see _OutputClaims). Held until the
             # finished file is in place, so a duplicate row or the same song in another
             # playlist waits here and then finds this one's file.
-            async with self._claims.claim(target) as claim_key:
-                owner = self._claims.written_by.get(claim_key)
-                if owner is None or owner == identity or attempt_name >= 20:
+            async with self._claims.claim(target):
+                holder = await asyncio.to_thread(self._song_holder, target, track)
+                if holder != "other":
                     return await self._fetch_claimed(
-                        job, track, settings, detailed, index, out_dir, ext, name, target, claim_key,
-                        identity, phrase, phrase_timed_out, service, status, finish, phase)
-            # A different song already saved under this name in this run (two names that
-            # sanitise or truncate to the same thing): this one gets "(2)" instead of being
-            # "skipped" as if it were the same song.
+                        job, track, settings, detailed, index, out_dir, ext, name, target, holder,
+                        elsewhere, phrase, phrase_timed_out, service, status, finish, phase)
+            if attempt_name >= 20:
+                await status("\x1b[31m✗ every name for this song is taken by other files\x1b[0m", store=True)
+                return await finish(TrackOutcome(track, "download_failed",
+                                                 "every filename for it is taken by other recordings", []))
+            # A different song — or one whose identity can't be told — already has this name
+            # (two names that sanitise or truncate to the same thing, a file put there by hand).
+            # It is left alone, and this one gets "(2)" instead of being "skipped" as if it
+            # were the same song.
+            elsewhere.add(os.path.normcase(os.path.realpath(target)))
             attempt_name += 1
 
     async def _fetch_claimed(self, job: Job, track, settings: dict, detailed: bool, index: int,
-                             out_dir: Path, ext: str, basename: str, target: Path, claim_key: str,
-                             identity: tuple[str, str], phrase: str, phrase_timed_out: bool,
+                             out_dir: Path, ext: str, basename: str, target: Path, holder: str,
+                             elsewhere: set[str], phrase: str, phrase_timed_out: bool,
                              service: str, status, finish, phase) -> TrackOutcome:
-        """The rest of _fetch_track, run while this track holds the claim on `target`."""
+        """The rest of _fetch_track, run while this track holds the claim on `target`.
+
+        `holder` is "same" when the file at `target` is this song (by OmniDL's record or its
+        tags), "free" when there is none \u2014 or only an empty/unreadable one, kept aside."""
         skip = settings.get("skip_existing", True)
         broken: Path | None = None
         if target.exists():
-            if not skip:
+            if holder == "same" and not skip:
                 pass                                   # replaced by the fresh download below
-            elif _usable_media(target, track.duration):
+            elif holder == "same" and _usable_media(target, track.duration):
                 await status("\x1b[33m\u23ed already downloaded\x1b[0m", store=True)
                 # Still this job's result: from another device, Save should hand it over rather
                 # than a re-run playlist finishing with nothing to save.
                 job.produced.append(str(target))
-                self._claims.written_by.setdefault(claim_key, identity)
+                self.owners.record_track(target, track, job.id)
                 return await finish(TrackOutcome(track, "skipped", "output file already exists", [],
                                                  saved_as=target.name))
             else:
@@ -1457,7 +1842,8 @@ class JobManager:
                 await status("\x1b[33m\u26a0 the existing file is empty or unreadable - "
                              "downloading a fresh copy\x1b[0m", store=True)
         if skip and broken is None and settings.get("_library_index") and track.artist:
-            existing = settings["_library_index"].find(track.artist, track.title, track.duration)
+            existing = settings["_library_index"].find(track.artist, track.title, track.duration,
+                                                       exclude=elsewhere)
             if existing is not None:
                 relative = existing.relative_path
                 job.produced.append(str(existing.path))
@@ -1633,7 +2019,7 @@ class JobManager:
             await phase("Saving")
             await asyncio.to_thread(self._tag, staged, track)
             await asyncio.to_thread(self._publish, staged, target, broken)
-            self._claims.written_by[claim_key] = identity
+            self.owners.record_track(target, track, job.id)
             job.produced.append(str(target))
             result = "downloaded" if selected.accepted else "downloaded_for_review"
             tail = f"\x1b[2m{target.name} ({selected.candidate.source}, {selected.score}/100)\x1b[0m"

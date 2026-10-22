@@ -139,7 +139,8 @@ class ReportingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch("app.jobs.settings_mod.LOCAL_MODE", True):
             job = asyncio.run(manager.submit("https://www.youtube.com/watch?v=abc",
                                              {"output_dir": tmp, "audio_format": "opus"}, "s"))
-        self.assertIn("--print-to-file", job.argv)
+        at = job.argv.index("--omnidl-manifest")          # ytdlp_tool writes it, file by file
+        self.assertEqual(job.settings["_produced_file"], job.argv[at + 1])
 
 
 class TrackListSaveTests(unittest.IsolatedAsyncioTestCase):

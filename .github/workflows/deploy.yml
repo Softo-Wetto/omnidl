@@ -104,11 +104,14 @@ jobs:
             --exclude='./dist' \
             --exclude='./build' \
             --exclude='./downloads' \
+            --exclude='./hosted-downloads' \
             --exclude='./__pycache__' \
             --exclude='*/__pycache__' \
             --exclude='./.venv' \
             --exclude='./config.json' \
             --exclude='./history.json' \
+            --exclude='./history.json.bak' \
+            --exclude='./provenance.json' \
             --exclude='./cookies.txt' \
             --exclude='*.pyc' \
             -czf - . \

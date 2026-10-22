@@ -32,6 +32,7 @@ class BuildScriptTests(unittest.TestCase):
             out = pack / "dist" / "OmniDL"
             (out / "downloads").mkdir(parents=True)
             (out / "config.json").write_text('{"output_dir": "x"}')
+            (out / "provenance.json").write_text('{"files": {}}')
             (out / "downloads" / "song.opus").write_bytes(b"x")
         env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONSAFEPATH")}
         env["OMNIDL_NO_PAUSE"] = "1"
@@ -63,6 +64,7 @@ class BuildScriptTests(unittest.TestCase):
         self.assertIn("Done.", result.stdout)
         self.assertTrue((pack / "dist" / "OmniDL" / "OmniDL.exe").exists())
         self.assertTrue((pack / "dist" / "OmniDL" / "config.json").exists())
+        self.assertTrue((pack / "dist" / "OmniDL" / "provenance.json").exists())   # which file is which song
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows batch files")

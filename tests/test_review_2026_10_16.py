@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-from app import engines, jobs, main, scdl_tool, zipstream
+from app import engines, jobs, main, scdl_tool, ytdlp_tool, zipstream
 from app import settings as settings_mod
 from app.jobs import Job, JobManager
 from app.library import LibraryIndex, LibraryTrack, STAGING_DIR
@@ -112,10 +112,12 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
     def test_the_scdl_wrapper_adds_only_the_manifest(self):
         argv, manifest = scdl_tool.split_manifest(["-l", "u", "--omnidl-manifest", "C:/m.txt", "-c"])
         self.assertEqual((["-l", "u", "-c"], "C:/m.txt"), (argv, manifest))
-        params = scdl_tool.with_manifest({"postprocessors": [{"key": "FFmpegVideoRemuxer"}],
-                                          "print_to_file": {"after_move": [("title", "t.txt")]}}, "C:/m.txt")
+        params = ytdlp_tool.with_hooks({"postprocessors": [{"key": "FFmpegVideoRemuxer"}],
+                                        "print_to_file": {"after_move": [("title", "t.txt")]}}, "C:/m.txt", {})
         self.assertEqual([{"key": "FFmpegVideoRemuxer"}], params["postprocessors"])   # scdl's kept
-        self.assertEqual([("title", "t.txt"), ("filepath", "C:/m.txt")], params["print_to_file"]["after_move"])
+        self.assertEqual([("title", "t.txt"), (ytdlp_tool.MANIFEST_TEMPLATE, "C:/m.txt")],
+                         params["print_to_file"]["after_move"])
+        self.assertNotIn("match_filter", params)              # nothing known: nothing skipped
 
     def test_the_wrapper_hands_scdl_a_youtubedl_that_writes_the_manifest(self):
         import scdl.scdl as scdl_main
@@ -132,7 +134,7 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             scdl_main.YoutubeDL = original
         self.assertEqual(["scdl", "-l", "https://soundcloud.com/a"], seen["argv"])
-        self.assertIn(("filepath", "C:/m.txt"), seen["params"]["print_to_file"]["after_move"])
+        self.assertIn((ytdlp_tool.MANIFEST_TEMPLATE, "C:/m.txt"), seen["params"]["print_to_file"]["after_move"])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("yt-dlp"), "needs ffmpeg and yt-dlp")
     def test_yt_dlp_lists_a_file_it_found_already_downloaded(self):
@@ -317,8 +319,11 @@ class OutputOwnershipTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("cancelled", results[1].status)
 
     async def test_an_empty_or_cut_off_file_is_replaced_and_kept_aside(self):
-        for name, prepare in (("empty", lambda p: p.write_bytes(b"")),
-                              ("cut off", lambda p: make_audio(p, 1.0))):
+        def cut_off(path):                         # this song (by its tags), but only a second of it
+            make_audio(path, 1.0)
+            JobManager._tag(path, Track("Nova", "Midnight Run"))
+
+        for name, prepare in (("empty", lambda p: p.write_bytes(b"")), ("cut off", cut_off)):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 target = Path(tmp) / "Nova - Midnight Run.opus"
                 prepare(target)
@@ -333,9 +338,27 @@ class OutputOwnershipTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue((Path(tmp) / "Nova - Midnight Run (unreadable).opus").exists())
                 self.assertEqual([str(target)], job.produced)
 
-    async def test_real_audio_without_tags_still_counts_as_existing(self):
+    async def test_real_audio_without_tags_is_kept_but_not_taken_for_the_song(self):
+        """Playable but unidentifiable (no tags, no record — put there by hand, say): it isn't
+        broken, so it isn't set aside as "(unreadable)"; but nothing says it is this song either,
+        so it's left exactly as it is and the song is saved beside it (follow-up review F03)."""
         with tempfile.TemporaryDirectory() as tmp:
-            make_audio(Path(tmp) / "Nova - Midnight Run.opus", 3)
+            existing = make_audio(Path(tmp) / "Nova - Midnight Run.opus", 3)
+            before = existing.read_bytes()
+            job = Job("a", "youtube", None, "", settings=track_settings(tmp))
+            job.status = "running"
+            (result,), started = await self.fetch_many(
+                lambda m: [m._fetch_track(job, Track("Nova", "Midnight Run", 3), job.settings, False, 1, 1)],
+                tmp=tmp)
+            self.assertEqual(("downloaded", 1), (result.status, len(started)))
+            self.assertEqual("Nova - Midnight Run (2).opus", result.saved_as)
+            self.assertEqual(before, existing.read_bytes())
+            self.assertFalse((Path(tmp) / "Nova - Midnight Run (unreadable).opus").exists())
+
+    async def test_real_audio_tagged_as_the_song_counts_as_existing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = make_audio(Path(tmp) / "Nova - Midnight Run.opus", 3)
+            JobManager._tag(existing, Track("Nova", "Midnight Run"))
             job = Job("a", "youtube", None, "", settings=track_settings(tmp))
             job.status = "running"
             (result,), started = await self.fetch_many(
@@ -502,17 +525,18 @@ class ExpiryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_interrupted_and_orphaned_hosted_files_are_deleted_after_the_ttl(self):
         with tempfile.TemporaryDirectory() as tmp, patch("app.jobs.settings_mod.LOCAL_MODE", False), \
-                patch("app.jobs.DOWNLOAD_ROOT", Path(tmp)):
-            known = Path(tmp) / "s" / "known"
-            orphan = Path(tmp) / "s" / "orphan"
+                patch("app.jobs.DOWNLOAD_ROOT", Path(tmp)), patch("app.jobs.LEGACY_DOWNLOAD_ROOT", Path(tmp)):
+            job = Job("x", "youtube", ["yt-dlp"], "", session="s")
+            gone = Job("y", "youtube", ["yt-dlp"], "", session="s")     # history no longer has it
+            JobManager._prepare_out_dir(job, {}, "s")
+            JobManager._prepare_out_dir(gone, {}, "s")
+            known, orphan = job.out_dir, gone.out_dir
             for folder in (known, orphan):
-                folder.mkdir(parents=True)
                 (folder / "a.opus").write_bytes(b"x")
             manager = JobManager()
             manager._persist = lambda: None
             manager._send = AsyncMock()
-            job = Job("x", "youtube", ["yt-dlp"], "")
-            job.out_dir, job.status = known, "running"
+            job.status = "running"
             restored = Job.from_record(job.to_record())
             manager.jobs[restored.id] = restored
             await manager._expire_files(now=time.time() + 60)

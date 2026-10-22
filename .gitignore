@@ -1,6 +1,9 @@
 config.json
 history.json
+history.json.bak
+provenance.json
 downloads/
+hosted-downloads/
 __pycache__/
 *.pyc
 .venv/

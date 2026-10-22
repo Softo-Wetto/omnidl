@@ -86,13 +86,32 @@ def _tool_cmd(tool: str) -> list[str]:
     entry point dispatches to the bundled module. Dev: use the installed tool.
     """
     if FROZEN:
-        return [sys.executable, "--run-tool", tool]
+        return [sys.executable, "--run-tool", "yt-dlp" if tool == "yt-dlp-link" else tool]
     if tool == "spotdl":
         return [sys.executable, "-u", "-m", "spotdl"]
     if tool == "scdl":
         # Through OmniDL's wrapper, which adds the per-job file manifest (see scdl_tool).
         return [sys.executable, "-u", str(Path(__file__).with_name("scdl_tool.py"))]
+    if tool == "yt-dlp-link":
+        # A pasted link: yt-dlp with OmniDL's manifest and known-recording hooks (see
+        # ytdlp_tool). The .exe's "--run-tool yt-dlp" always goes through the wrapper.
+        return [sys.executable, "-u", str(Path(__file__).with_name("ytdlp_tool.py"))]
     return [_tool_path(tool)]
+
+
+# Bookkeeping flags for OmniDL's wrappers (ytdlp_tool, scdl_tool) — not the tools' own options.
+_MANIFEST_FLAG = "--omnidl-manifest"
+_KNOWN_FLAG = "--omnidl-known"
+
+
+def _link_hooks(s: dict) -> list[str]:
+    """The wrapper flags for a staged link job: report each file, skip recordings already saved."""
+    cmd: list[str] = []
+    if s.get("_produced_file"):
+        cmd += [_MANIFEST_FLAG, s["_produced_file"]]
+    if s.get("_known_file"):
+        cmd += [_KNOWN_FLAG, s["_known_file"]]
+    return cmd
 
 
 def _spotify_cmd(text: str, s: dict) -> list[str]:
@@ -139,8 +158,9 @@ def _ytdlp_common(s: dict, youtube: bool = True) -> list[str]:
         cmd += ["--cookies-from-browser", browser]
     if s.get("sponsorblock"):
         cmd += ["--sponsorblock-remove", "music_offtopic"]
-    if s.get("_produced_file"):
-        # One line per final file — how a local job knows what it saved, for Save on another device.
+    if s.get("_produced_file") and not s.get("_stage_dir"):
+        # One line per final file — how a local job knows what it saved, for Save on another
+        # device. (A staged link job gets a richer manifest from ytdlp_tool instead.)
         cmd += ["--print-to-file", "after_move:filepath", s["_produced_file"]]
     if youtube and _settings.POT_PROVIDER_URL:
         cmd += ["--extractor-args", f"youtubepot-bgutilhttp:base_url={_settings.POT_PROVIDER_URL}"]
@@ -157,10 +177,10 @@ def conversion_quality(s: dict) -> str:
     return _settings.audio_quality(s.get("bitrate"))
 
 
-def _ytdlp_base(s: dict, out_template: str, youtube: bool = True) -> list[str]:
+def _ytdlp_base(s: dict, out_template: str, youtube: bool = True, tool: str = "yt-dlp") -> list[str]:
     """Common yt-dlp args (audio extraction, metadata, cookies, JS runtime)."""
     cmd = [
-        *_tool_cmd("yt-dlp"), "-x",
+        *_tool_cmd(tool), "-x",
         "--audio-format", s["audio_format"],
         "--embed-metadata",
         "--newline",
@@ -194,11 +214,11 @@ def _video_format_selector(quality: str, container: str) -> str:
     )
 
 
-def _ytdlp_video_base(s: dict, out_template: str, youtube: bool = True) -> list[str]:
+def _ytdlp_video_base(s: dict, out_template: str, youtube: bool = True, tool: str = "yt-dlp") -> list[str]:
     """yt-dlp args to download full video, merged to one container."""
     container = s.get("video_container") or "mp4"
     cmd = [
-        *_tool_cmd("yt-dlp"),
+        *_tool_cmd(tool),
         "-f", _video_format_selector(s.get("video_quality", "1080p"), container),
         "--merge-output-format", container,
         "--embed-metadata",
@@ -209,12 +229,24 @@ def _ytdlp_video_base(s: dict, out_template: str, youtube: bool = True) -> list[
 
 
 def _youtube_cmd(text: str, s: dict) -> list[str]:
-    out_template = str(Path(s["output_dir"]) / "%(title)s.%(ext)s")
+    stage = s.get("_stage_dir")
+    if stage:
+        # A link job downloads into its own staging folder, each video in a numbered folder of
+        # its own, and OmniDL files the results into the output folder afterwards (see
+        # jobs._settle_staged). Named by title alone, two different videos called the same
+        # thing used to be one file: the second "already downloaded", with the first's audio.
+        out_template = str(Path(stage) / "%(autonumber)s" / "%(title)s.%(ext)s")
+        tool = "yt-dlp-link"
+    else:
+        out_template = str(Path(s["output_dir"]) / "%(title)s.%(ext)s")
+        tool = "yt-dlp"
     youtube = not is_url(text) or is_youtube_url(text)
     if s.get("media_type") == "video":
-        cmd = _ytdlp_video_base(s, out_template, youtube)
+        cmd = _ytdlp_video_base(s, out_template, youtube, tool)
     else:
-        cmd = _ytdlp_base(s, out_template, youtube)
+        cmd = _ytdlp_base(s, out_template, youtube, tool)
+    if stage:
+        cmd += _link_hooks(s)
     cmd.append(text if is_url(text) else f"ytsearch1:{text}")
     return cmd
 
@@ -255,12 +287,16 @@ def soundcloud_format_note(audio_format: str) -> str:
 
 
 def _soundcloud_cmd(text: str, s: dict) -> list[str]:
-    cmd = [*_tool_cmd("scdl"), "-l", text, "--path", s["output_dir"], "-c", "--addtofile"]
+    # A staged job downloads into its own folder and OmniDL files the tracks into the output
+    # folder afterwards, as for any link (see _youtube_cmd).
+    cmd = [*_tool_cmd("scdl"), "-l", text, "--path", s.get("_stage_dir") or s["output_dir"], "-c", "--addtofile"]
     cmd += _SOUNDCLOUD_FORMAT_ARGS.get(s["audio_format"], [])
-    if s.get("_produced_file"):
+    if s.get("_stage_dir"):
+        cmd += _link_hooks(s)
+    elif s.get("_produced_file"):
         # One line per file the job ends up with, including tracks already there (see
         # scdl_tool) — how a re-run or hosted SoundCloud playlist still offers its files.
-        cmd += ["--omnidl-manifest", s["_produced_file"]]
+        cmd += [_MANIFEST_FLAG, s["_produced_file"]]
     return cmd
 
 
@@ -280,15 +316,18 @@ def build_command(engine: str, text: str, settings: dict) -> list[str]:
 def describe_command(argv: list[str]) -> str:
     """Printable command line with secrets redacted, for the terminal header."""
     tokens = list(argv)
-    if "--omnidl-manifest" in tokens:                 # bookkeeping, not part of the command
-        at = tokens.index("--omnidl-manifest")
-        del tokens[at:at + 2]
+    for flag in (_MANIFEST_FLAG, _KNOWN_FLAG):         # bookkeeping, not part of the command
+        if flag in tokens:
+            at = tokens.index(flag)
+            del tokens[at:at + 2]
     if len(tokens) >= 3 and tokens[1] == "--run-tool":
         tokens = tokens[2:]
     elif tokens[:4] == [sys.executable, "-u", "-m", "spotdl"]:
         tokens = ["spotdl", *tokens[4:]]
     elif len(tokens) >= 3 and tokens[0] == sys.executable and tokens[2].endswith("scdl_tool.py"):
         tokens = ["scdl", *tokens[3:]]
+    elif len(tokens) >= 3 and tokens[0] == sys.executable and tokens[2].endswith("ytdlp_tool.py"):
+        tokens = ["yt-dlp", *tokens[3:]]
     elif tokens and tokens[0] == sys.executable:
         tokens = ["python", *tokens[1:]]
 

@@ -33,8 +33,9 @@ def _run_tool() -> int:
             pass
 
     if tool == "yt-dlp":
-        from yt_dlp import main as yt_main
-        return yt_main(tool_args) or 0
+        # Plain yt-dlp, plus OmniDL's link-job hooks when a link job passes their flags.
+        from app.ytdlp_tool import main as ytdlp_main
+        return ytdlp_main(tool_args) or 0
     if tool == "spotdl":
         from spotdl import console_entry_point
         console_entry_point()

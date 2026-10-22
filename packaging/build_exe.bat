@@ -29,7 +29,7 @@ if not exist "%KEEP%" (
     set "RC=1"
     goto :end
 )
-for %%F in (config.json history.json remote.json) do (
+for %%F in (config.json history.json history.json.bak remote.json provenance.json) do (
     if exist "%OUT%\%%F" (
         move /y "%OUT%\%%F" "%KEEP%\" >nul
         if exist "%OUT%\%%F" (
@@ -56,7 +56,7 @@ if not "%RC%"=="0" echo FAILED: the build stopped with an error (code %RC%).
 rem Restore whatever was set aside, even after a failed build, so nothing is stranded.
 if not exist "%OUT%" mkdir "%OUT%"
 set "RESTORE_FAILED="
-for %%F in (config.json history.json remote.json) do (
+for %%F in (config.json history.json history.json.bak remote.json provenance.json) do (
     if exist "%KEEP%\%%F" (
         move /y "%KEEP%\%%F" "%OUT%\" >nul
         if exist "%KEEP%\%%F" set "RESTORE_FAILED=1"

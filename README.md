@@ -213,7 +213,16 @@ to be enabled).
 - **One copy at a time** — the same song in two rows of a list, or in two playlists running at
   once, is downloaded once: the second waits and then finds the first one's file. Downloads are
   written to a hidden `.omnidl-staging` folder and moved to their real name only when complete,
-  so a half-finished file never sits in your library.
+  so a half-finished file never sits in your library. Pasted links work the same way: each
+  video is moved into your folder as soon as it finishes.
+- **A file is only reused if it's the same recording** — a name alone can't tell: "A/B - Song"
+  and "A_B - Song" are both saved as `A_B - Song`, two different videos can share a title, and
+  long names are cut short. OmniDL remembers which recording each file it saves holds (a song's
+  artists and title, or a link's site and video ID) in `provenance.json`, kept across restarts,
+  and also reads the file's own tags. The same recording is skipped as already downloaded; a
+  different one gets its own file, `Title (2).mp3`, and the existing file is never replaced. A
+  file whose recording can't be told (no tags, put there by hand) is left exactly as it is, and
+  the download is saved beside it.
 - **Parallel downloads** — Settings → *Parallel* (default 3, up to 8) downloads that many
   playlist tracks at once for a big speedup. At >1 the log switches to a compact per-track
   checklist (`✓ [12/64] Artist — Title`); at 1 you get the detailed per-track stream.
@@ -421,8 +430,8 @@ Optional — only for running OmniDL on a machine *without* Python. On your own 
 **`packaging\build_exe.bat`**.
 
 The result is **`packaging/dist/OmniDL/OmniDL.exe`** (a folder bundle — ship the whole
-`OmniDL` folder). It has its own `config.json` and `downloads/`, created next to the exe on
-first run; rebuilding keeps them.
+`OmniDL` folder). It has its own `config.json`, history, `provenance.json` and `downloads/`,
+created next to the exe on first run; rebuilding keeps them.
 
 **ffmpeg is still required** and must be on your PATH (or drop `ffmpeg.exe` into the
 `OmniDL` folder). The bundle does not include ffmpeg.
@@ -477,6 +486,13 @@ exact versions they passed with are written to `docs/tested-versions.txt`.
 
 - Local-only by design: binds `127.0.0.1`, no login. Commands are executed as argv lists
   with `shell=False`, so a pasted link can never inject shell commands.
+- **Hosted mode** (`OMNIDL_HOST=0.0.0.0`, as on the public site) keeps each visitor's downloads
+  in its own folder under `hosted-downloads/` (or `OMNIDL_DOWNLOAD_ROOT`) and deletes them an
+  hour after the job ends. Cleanup only removes folders OmniDL marked as a hosted job's own
+  (a `.omnidl-job` file inside), so a music library is never at risk, even if the two folders
+  are the same. Hosted downloads used to live in `downloads/`: folders of jobs still in the
+  history are carried over and cleaned up as usual; older ones are listed at startup
+  ("…aren't linked to any job") for you to check and delete yourself.
 - Built on the spirit of [SomeDL](https://github.com/ChemistryGull/SomeDL), extended to
   three engines with a unified streaming terminal.
 - Please only download content you have the right to.

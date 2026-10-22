@@ -1,0 +1,47 @@
+{
+  "commit": "88d6cd0",
+  "unsafeOrphanCleanup": {
+    "untrackedLibraryAlbumDeleted": true,
+    "userFileDeleted": true
+  },
+  "collisionAfterRestart": {
+    "differentIdentities": true,
+    "sameFilename": true,
+    "outcome": "skipped",
+    "requestedArtist": "A_B",
+    "deliveredArtist": [
+      "A/B"
+    ],
+    "searchCalls": 0,
+    "fileOffered": true
+  },
+  "directUrlCollision": {
+    "jobs": [
+      {
+        "status": "done",
+        "sourceId": "fixture-0",
+        "sourceSeconds": 2,
+        "deliveredSeconds": 2.04,
+        "files": [
+          "Same title.mp3"
+        ],
+        "sha256": "fd0f08ad2b59a42fb136802650cb8814d4687d927fd829313842150affaeb491",
+        "decodedAudioSha256": "SHA256=2eabec38c6f01254924ae614591efe130fe4f1cbf9590af74b134ec09fadb079",
+        "alreadyDownloaded": false
+      },
+      {
+        "status": "done",
+        "sourceId": "fixture-1",
+        "sourceSeconds": 4,
+        "deliveredSeconds": 2.04,
+        "files": [
+          "Same title.mp3"
+        ],
+        "sha256": "7b725a9d399062e984fad7cc7d89018a9882b0e29c56e0d0019109be8f0eddf8",
+        "decodedAudioSha256": "SHA256=2eabec38c6f01254924ae614591efe130fe4f1cbf9590af74b134ec09fadb079",
+        "alreadyDownloaded": true
+      }
+    ],
+    "sameDecodedAudio": true
+  }
+}

@@ -24,9 +24,15 @@ else:
 CONFIG_PATH = PROJECT_ROOT / "config.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "downloads"
 
-# Where per-session/per-job downloads land before they're handed to the browser, and how
-# long finished files survive before the cleanup task removes them.
-DOWNLOAD_ROOT = Path(os.environ.get("OMNIDL_DOWNLOAD_ROOT") or (PROJECT_ROOT / "downloads"))
+# Hosted mode: where each job's downloads wait for the visitor to save them, and how long
+# finished files survive before the cleanup task removes them. Deliberately not the library
+# folder above — it used to be, so a local install restarted in hosted mode could have its
+# Artist/Album folders taken for expired downloads. Cleanup only ever deletes folders OmniDL
+# marked as a hosted job's own (see jobs._owned_job_dir), wherever this points.
+DOWNLOAD_ROOT = Path(os.environ.get("OMNIDL_DOWNLOAD_ROOT") or (PROJECT_ROOT / "hosted-downloads"))
+# Where hosted downloads went before they had their own folder. Jobs still in the history are
+# carried over (their folders are marked when it loads); nothing unmarked here is ever touched.
+LEGACY_DOWNLOAD_ROOT = PROJECT_ROOT / "downloads"
 FILE_TTL_SECONDS = int(os.environ.get("OMNIDL_FILE_TTL") or 3600)
 
 # Local (personal) mode: write straight into the configured output folder and offer a

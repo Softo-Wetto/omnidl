@@ -1,6 +1,7 @@
 """Review-first inspection and duplicate awareness for a local music library."""
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -286,12 +287,18 @@ class LibraryIndex:
                 for alias in _artist_aliases(other_artist):
                     self._by_identity.setdefault((alias, _normalise(other_title)), []).append(item)
 
-    def find(self, artist: str, title: str, duration: int = 0) -> LibraryTrack | None:
+    def find(self, artist: str, title: str, duration: int = 0,
+             exclude: set[str] | None = None) -> LibraryTrack | None:
+        """The best file already in the library for this song. `exclude` holds files (normcased
+        real paths) already judged to be something else, which a looser reading here — a name,
+        without tags — mustn't hand back."""
         key_title = _normalise(title)
         matches: list[LibraryTrack] = []
         seen: set[int] = set()
         for alias in _artist_aliases(artist) or [_normalise(artist)]:
             for item in self._by_identity.get((alias, key_title), []):
+                if exclude and os.path.normcase(os.path.realpath(item.path)) in exclude:
+                    continue
                 if id(item) not in seen:
                     seen.add(id(item))
                     matches.append(item)
