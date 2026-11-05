@@ -11,7 +11,7 @@ sys.path.insert(0, ROOT)
 
 # Packages whose code AND data files we want fully bundled.
 _PACKAGES = [
-    "spotdl", "yt_dlp", "scdl",
+    "spotdl", "SpotipyFree", "spotapi", "yt_dlp", "scdl",
     "uvicorn", "fastapi", "starlette", "pydantic", "pydantic_core",
     "websockets", "anyio", "sniffio", "h11", "click",
     "rich", "mutagen", "ytmusicapi", "rapidfuzz", "requests",

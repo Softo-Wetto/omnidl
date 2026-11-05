@@ -167,10 +167,10 @@ DEFAULTS: dict[str, Any] = {
     "naming_order": "artist-title",
     "naming_artists": "all",
     # How to handle Spotify links:
-    #   "embed"  -> scrape the public embed page for the track list, download via yt-dlp
-    #               (free, no API, no Premium — the default since Spotify locked the API).
-    #   "spotdl" -> use spotdl (only works if your dev app's owner has Premium).
-    "spotify_method": "embed",
+    # SpotipyFree metadata first, independent Spotify web recovery for missing entries;
+    # verified YouTube Music / YouTube audio is fetched with yt-dlp. Old "embed" configs
+    # still enter this pipeline; spotdl remains available to legacy direct command users.
+    "spotify_method": "spotipyfree",
     "cookie_file": "",          # path to a cookies.txt (used by spotdl + yt-dlp)
     "cookies_from_browser": "none",  # yt-dlp only: pull cookies straight from a browser
     "default_text_engine": "youtube",  # plain-text searches always go to yt-dlp now
@@ -369,13 +369,13 @@ def clean_session_prefs(new: dict) -> dict:
 
 def effective_settings(prefs: dict | None = None) -> dict:
     """Server defaults overlaid with one session's allowed preferences. Spotify is forced
-    to the credential-free embed method (no per-user API keys on a public service)."""
+    to SpotipyFree with web recovery (no per-user API keys on a public service)."""
     data = load_settings()
     if prefs:
         for key in SESSION_PREF_KEYS:
             if key in prefs:
                 data[key] = prefs[key]
-    data["spotify_method"] = "embed"
+    data["spotify_method"] = "spotipyfree"
     # A cookies.txt (from a logged-in YouTube account) is the strongest defence against
     # bot-gating. Hosted operators point to one with OMNIDL_COOKIE_FILE.
     env_cookie = os.environ.get("OMNIDL_COOKIE_FILE")

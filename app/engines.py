@@ -15,7 +15,7 @@ from pathlib import Path
 from . import settings as _settings
 
 ENGINES = {
-    "spotify": {"label": "Spotify", "tool": "spotdl"},
+    "spotify": {"label": "Spotify", "tool": "SpotipyFree → yt-dlp"},
     "youtube": {"label": "YouTube", "tool": "yt-dlp"},
     "soundcloud": {"label": "SoundCloud", "tool": "scdl"},
 }

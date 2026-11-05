@@ -1,6 +1,6 @@
 # OmniDL
 
-One local web app that wraps **spotDL**, **yt-dlp**, and **scdl** behind a single smart
+One local web app that combines **SpotipyFree**, **yt-dlp**, and **scdl** behind a single smart
 input bar and one live terminal. Paste any Spotify / YouTube / SoundCloud link (or type a
 search) — OmniDL auto-detects the right engine, streams the live download output into an
 in-browser terminal, and drops the audio into your output folder.
@@ -8,36 +8,35 @@ in-browser terminal, and drops the audio into your output folder.
 ```
 ┌───────────────────────────────────────────────┐
 │ Paste link or search…            [Download ▸]  │
-│ detected: ● Spotify · embed → yt-dlp           │
+│ detected: ● Spotify · SpotipyFree → yt-dlp     │
 ├───────────────────────────────────────────────┤
-│ Resolving Spotify link via public embed…       │
+│ Resolving Spotify link via SpotipyFree…        │
 │ Found 23 track(s) in playlist "My Mix".        │
 │ [1/23] Artist A - Song A   [######    ] 61%    │
 └───────────────────────────────────────────────┘
 ```
 
-## Why this exists — the Spotify 403
+## Spotify metadata and audio
 
-spotDL fails with:
+Older setups using Spotify's official developer API could fail with:
 
 ```
 SpotifyException: http status: 403 — Active premium subscription required for the owner of the app.
 ```
 
-This is **not** a spotDL bug, and the old advice to "make your own free developer app" **no
-longer works** — Spotify's Web API now requires the *owner of the app* to have Premium, and
-that applies to your own free app too (verified with a direct API call: a freshly-minted
-token from a free-account app still gets 403 on the playlist endpoint).
+OmniDL uses **[SpotipyFree](https://github.com/TzurSoffer/spotipyFree) first** for public
+Spotify track, album, and playlist metadata. No developer credentials or interactive Spotify
+login are needed. If the provider fails or returns an incomplete list, the existing Spotify
+web/embed resolver attempts to recover the missing entries. Preferred metadata and repeated
+playlist entries are preserved. A list that remains incomplete is visibly marked with issues.
 
-**OmniDL's fix: skip the Web API entirely.** For Spotify links it uses the **Embed scrape**
-method by default — it reads the public `open.spotify.com/embed/...` page for the track list
-(artist + title), then downloads each track with **yt-dlp**. That needs **no API, no login,
-no credentials, and no Premium**. Just paste a Spotify track / album / playlist URL and go.
-Files are named `Artist - Title` from the Spotify metadata.
+SpotipyFree supplies names and tags, **not audio**. OmniDL matches those tracks to verified
+**YouTube Music** results, downloads with **yt-dlp**, and tries the same recording on regular
+**YouTube** when necessary. Files are named from the Spotify metadata. A track with no safe
+match remains in the review report rather than being replaced with a different version.
 
-> spotDL is still bundled and selectable (**Settings → Spotify source → spotdl**) for anyone
-> whose developer app *is* owned by a Premium account, but **Embed** is the default and the
-> one that works for free.
+Legacy `spotify_method: "embed"` configurations use this same pipeline. spotDL remains
+bundled for legacy command support; the dashboard uses SpotipyFree and yt-dlp.
 
 ## Requirements
 
@@ -343,7 +342,7 @@ left undownloaded, not replaced by a wrong version. Zero wrong versions were dow
 strict matching off, one unverified pick in 360 was the wrong edit.
 
 The matching switches in **Settings** apply to all of this: **Only download verified
-matches** (step 5), **Prefer YouTube Music** (official audio wins ties) and **Match result to
+matches** (step 5), **Prefer YouTube Music** (verified Music results are tried first for Spotify) and **Match result to
 track length** (step 4).
 
 ### Spotify match quality
@@ -352,7 +351,9 @@ A Spotify link resolves to a track list, then each track is matched to the clean
 
 1. **YouTube Music official audio** (default, **Prefer YouTube Music** on).
 2. **YouTube search**.
-3. **SoundCloud search**.
+
+Spotify uses the YouTube sources by default. Auto searches for typed/pasted song names still
+include SoundCloud; the explicit SoundCloud-only restriction continues to apply.
 
 Every candidate is scored against the Spotify title, artist, and duration — see
 [How a song is matched](#how-a-song-is-matched). Only a verified match is downloaded; with
@@ -366,22 +367,18 @@ search links for Spotify, Apple Music/iTunes, YouTube Music, Amazon, Pandora, De
 Qobuz, SoundCloud, Bandcamp, and the remaining requested storefronts. Storefront entries are
 search links, not automated catalog checks or download sources.
 
-You can't download Spotify's own (DRM-protected) file without Premium + credentials, so the
-YT Music official audio is the closest clean equivalent. Optionally enable **Trim non-music
+This pipeline downloads the matched external recording, rather than a Spotify stream.
+Optionally enable **Trim non-music
 segments** (SponsorBlock) for any source that still has intro/outro chatter.
 
-**Big playlists (100+).** The embed page only lists 100 tracks, so OmniDL also reads
-Spotify's *own* anonymous web-player token (embedded in that page) and pages through the full
-track list with the web player's own API, 100 at a time. That token is minted by Spotify's
-first-party app, so it isn't subject to the "app owner must be Premium" block. A page that
-fails is retried with back-off (and Spotify's query id re-read if it has rotated); if one keeps
-failing, everything fetched before it is still downloaded and the job says **Completed with
-issues — Spotify returned only the first N tracks** rather than quietly stopping at 100.
-Checked on real playlists of 150 and 200 tracks (all read in 2–4 s); a 650-track list with a
-rate-limited page is covered by the tests. The card counts as it goes ("57 saved · 2 not
-found — 250 tracks").
+**Big playlists (100+).** SpotipyFree's full-list methods run first. Its returned entries are
+checked against the collection's advertised count. If they fall short, the Spotify web-player
+resolver and embed fallback attempt recovery. An embed preview at its 100-track cap is always
+marked incomplete, even if no anonymous token is available. Recoverable entries are retained
+when another page/provider fails, and the card counts outcomes as it goes. Failed-track
+retries preserve the Spotify audio-source preference across restarts.
 
-**Real Spotify tags.** When the token path is used, OmniDL also gets each track's album,
+**Real Spotify tags.** When the metadata provider supplies them, OmniDL gets each track's album,
 track number, and cover art, and writes them onto the file with `mutagen` (overriding the
 YouTube source's tags) so your library shows correct artist / title / album / artwork.
 
@@ -450,9 +447,9 @@ shuts it down.
 
 | Setting | Used by | Notes |
 | --- | --- | --- |
-| Spotify source | Spotify | `embed` (free, default) or `spotdl` (needs a Premium-owned app). |
-| Match to track length | Spotify (embed) | Pick the YouTube result whose duration matches the track. |
-| Spotify Client ID / Secret | spotDL method | Only used if Source = spotdl. |
+| Spotify source | Spotify | SpotipyFree first, Spotify web recovery if needed; yt-dlp fetches matched external audio. |
+| Match to track length | Spotify | Check the candidate's duration against the Spotify track. |
+| Spotify Client ID / Secret | legacy spotDL method | Not needed by the dashboard's Spotify pipeline. |
 | Spotify filename template | spotDL method | e.g. `{artists} - {title}.{output-ext}`. |
 | Output folder | all | Defaults to `./downloads`. Checked before saving: a path that can't be created or written to is refused next to the field, and the old setting stays. `%USERPROFILE%\Music`, `$HOME/Music` and `~\Music` are expanded and saved as the full path, so the folder that was checked is the one that's used. |
 | Audio format | all | mp3 (default) / opus / m4a / flac / wav / ogg. |

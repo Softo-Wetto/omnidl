@@ -70,7 +70,7 @@ class PlaylistPagingTests(unittest.TestCase):
              patch("app.spotify_resolver._fetch_embed", return_value="embed"), \
              patch("app.spotify_resolver._parse_embed", return_value=("Big", embed)), \
              patch("app.spotify_resolver._token", return_value="token"):
-            resolved = sr.resolve("https://open.spotify.com/playlist/abc123")
+            resolved = sr._resolve_web("https://open.spotify.com/playlist/abc123")
         self.assertEqual(200, len(resolved.tracks))
         self.assertTrue(resolved.truncated)
 

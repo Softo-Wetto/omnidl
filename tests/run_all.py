@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = ["fastapi", "starlette", "uvicorn", "websockets", "h11", "yt-dlp", "yt-dlp-ejs", "spotdl",
+PACKAGES = ["fastapi", "starlette", "uvicorn", "websockets", "h11", "yt-dlp", "yt-dlp-ejs", "spotdl", "spotipyFree", "spotapi",
             "scdl", "ytmusicapi", "mutagen", "pyinstaller"]
 
 

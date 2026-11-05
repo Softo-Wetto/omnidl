@@ -264,7 +264,7 @@ function updateChip() {
     chip.textContent = `Song search · ${where}`;
   } else {
     chip.className = "chip " + engine;
-    let tool = engine === "spotify" ? "embed → yt-dlp" : ENGINE_TOOL[engine];
+    let tool = engine === "spotify" ? "SpotipyFree → yt-dlp" : ENGINE_TOOL[engine];
     if (wantsVideo) tool += " · video";
     chip.textContent = `${ENGINE_LABEL[engine]} · ${tool}`;
   }

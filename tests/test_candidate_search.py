@@ -16,7 +16,7 @@ class CandidateSearchTests(unittest.TestCase):
 
         self.assertEqual("youtube_music", result[0].source)
         self.assertTrue(result[0].official)
-        self.assertEqual("https://www.youtube.com/watch?v=abc", result[0].url)
+        self.assertEqual("https://music.youtube.com/watch?v=abc", result[0].url)
 
     def test_converts_soundcloud_flat_search_entry_to_candidate(self):
         items = [{

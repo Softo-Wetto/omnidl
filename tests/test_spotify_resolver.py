@@ -1,9 +1,10 @@
+"""The independent Spotify web fallback; primary SpotipyFree coverage is in test_spotify_priority."""
 import unittest
 from email.message import Message
 from urllib.error import HTTPError
 from unittest.mock import MagicMock, patch
 
-from app.spotify_resolver import Track, _api, _track_from_partner, resolve
+from app.spotify_resolver import Track, _api, _track_from_partner, _resolve_web as resolve
 
 
 class SpotifyResolverTests(unittest.TestCase):

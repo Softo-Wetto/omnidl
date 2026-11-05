@@ -588,6 +588,11 @@ class Job:
         # Set when Spotify wouldn't hand over the whole playlist (see spotify_resolver).
         self.incomplete_list = False
 
+    @property
+    def spotify_audio(self) -> bool:
+        """Spotify source ordering also applies to a retry of its failed tracks."""
+        return self.kind == "spotify" or bool(self.settings.get("_spotify_audio"))
+
     def append(self, text: str) -> None:
         self.appended += len(text)
         self.output += text
@@ -685,6 +690,7 @@ class Job:
         rec["spotify_url"] = self.spotify_url
         rec["list_name"] = self.list_name
         rec["bulk_service"] = self.settings.get("bulk_service")
+        rec["spotify_audio"] = self.spotify_audio
         # The list itself, so a pasted list can be retried after a restart.
         rec["tracks"] = ([{"artist": t.artist, "title": t.title, "artists": list(t.artists),
                            "duration": t.duration} for t in self.tracks]
@@ -748,6 +754,7 @@ class Job:
             "video_quality": rec.get("video_quality"),
             "audio_format": rec.get("audio_format"),
             "bulk_service": rec.get("bulk_service") or "auto",
+            "_spotify_audio": bool(rec.get("spotify_audio")),
         }
         return job
 
@@ -979,6 +986,7 @@ class JobManager:
         for field in ("media_type", "video_quality", "audio_format"):
             if old.settings.get(field):
                 s[field] = old.settings[field]
+        s["_spotify_audio"] = old.spotify_audio
         if failed_only:
             if not old.failed_tracks:
                 return "Nothing failed in that job."
@@ -1025,10 +1033,10 @@ class JobManager:
         job = Job(input_text, engine, None, "", session=session, settings=s, ip=ip)
         self._prepare_out_dir(job, s, session)
 
-        if engine == "spotify" and s.get("spotify_method", "embed") == "embed":
+        if engine == "spotify" and s.get("spotify_method", "spotipyfree") in ("spotipyfree", "embed"):
             job.spotify_url = input_text
             job.kind = "spotify"
-            job.display_cmd = "resolve Spotify via public embed (no API / no Premium)"
+            job.display_cmd = "resolve Spotify via SpotipyFree, then match YouTube Music / YouTube"
         else:
             if engine in ("youtube", "soundcloud"):
                 # A manifest of every file the job ends up with — including ones it found
@@ -1548,27 +1556,29 @@ class JobManager:
             resolved = None
             await self._emit(job, f"\r\n\x1b[1;32m\U0001f4cb {job.list_name or 'Pasted list'}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} (searching {where})\x1b[0m\r\n")
         else:
-            await self._emit(job, "\r\n\x1b[1;36m\U0001f50e Resolving Spotify link...\x1b[0m \x1b[2m(no API - no Premium)\x1b[0m\r\n")
+            await self._emit(job, "\r\n\x1b[1;36m\U0001f50e Resolving Spotify link...\x1b[0m \x1b[2m(SpotipyFree first, web recovery if needed)\x1b[0m\r\n")
             resolved = await asyncio.to_thread(sr.resolve, job.spotify_url)
             tracks = resolved.tracks
             total = len(tracks)
             job.list_name = resolved.name or job.list_name
+            await self._emit(job, f"\x1b[2m   Metadata: {getattr(resolved, 'provider', 'Spotify')}. "
+                                  "Audio: YouTube Music, with YouTube fallback.\x1b[0m\r\n")
             await self._send(job, {"type": "status", "job": job.to_dict()})
             await self._emit(job, f"\x1b[1;32m\U0001f4cb {resolved.name}\x1b[0m \x1b[2m- {total} track{'s' if total != 1 else ''} ({resolved.kind})\x1b[0m\r\n")
         if resolved is not None and getattr(resolved, "truncated", False):
-            # Spotify kept refusing the rest of the list, so this is the start of a larger
-            # playlist. Say so unmistakably rather than let the run look complete.
+            # Recovery may contain entries from several pages/providers. Report incomplete
+            # metadata without claiming the missing entries are all at the end or rate-limited.
             await self._emit(
                 job,
-                f"\x1b[33m⚠ Spotify returned only the first {total} tracks of this playlist "
-                "(it's rate-limiting requests for the rest).\x1b[0m\r\n",
+                f"\x1b[33m⚠ Spotify metadata is incomplete: recovered {total} tracks. "
+                "Some entries could not be read.\x1b[0m\r\n",
             )
             await self._emit(
                 job,
                 f"\x1b[2m   Downloading those {total}. Re-run the playlist later for the rest — "
                 "already-downloaded tracks are skipped.\x1b[0m\r\n",
             )
-            job.note = f"Spotify returned only the first {total} tracks - re-run later for the rest"
+            job.note = f"Spotify metadata is incomplete: {total} tracks recovered - re-run later for the rest"
             job.incomplete_list = True
 
         if settings.get("skip_existing", True):
@@ -1739,6 +1749,8 @@ class JobManager:
         number of concurrent tracks stay live and readable without interleaving.
         """
         service = settings.get("bulk_service", "auto")
+        if job.spotify_audio and service == "auto":
+            service = "youtube"
         if service not in candidate_search.SERVICE_SOURCES:
             service = "auto"
         if not settings.get("_youtube_ok", True):
@@ -1940,7 +1952,12 @@ class JobManager:
                     prefer_ytmusic=settings.get("prefer_ytmusic", True),
                     use_duration=settings.get("spotify_match_duration", True),
                 )
-                return picked, ([d for d in picked.eligible if d.accepted] if strict else picked.eligible)
+                pool = [d for d in picked.eligible if d.accepted] if strict else list(picked.eligible)
+                if job.spotify_audio and settings.get("prefer_ytmusic", True):
+                    # Prefer Music only among safe candidates. A live edit, preview or
+                    # unverified result still cannot outrank a verified studio recording.
+                    pool.sort(key=lambda d: (not d.accepted, d.candidate.source != "youtube_music"))
+                return picked, pool
 
             candidates, failed = await search(False)
             choice, pool = pick(candidates)
@@ -1971,7 +1988,14 @@ class JobManager:
             # "the next plausible candidate" instead quietly saved a different edit that no
             # retry ever corrected. Failing here hands the track to the retry sweep instead.
             reference = pool[0] if pool else None
-            stand_ins = [d for d in pool if d is reference or same_recording(d, reference)][:5]
+            safe = [d for d in pool if d is reference or same_recording(d, reference)]
+            if job.spotify_audio and settings.get("prefer_ytmusic", True):
+                # Reserve a bounded fallback budget even when Music fills the first page.
+                # A single five-result cap could otherwise exclude YouTube completely.
+                stand_ins = ([d for d in safe if d.candidate.source == "youtube_music"][:5]
+                             + [d for d in safe if d.candidate.source != "youtube_music"][:5])
+            else:
+                stand_ins = safe[:5]
             selected = None
             attempts: list[MatchDecision] = []
             last_error = ""

@@ -1,9 +1,8 @@
 ﻿"""Resolve Spotify track/album/playlist URLs to a track list WITHOUT the Web API.
 
-Spotify's Web API now returns 403 for any app whose owner isn't Premium (this includes
-your own free developer app), which breaks spotDL entirely. Instead we read the public
-**embed** page's `__NEXT_DATA__` JSON, which needs no auth, no cookie, and no Premium.
-We then hand each "artist - title" to yt-dlp, which is where the audio comes from anyway.
+SpotipyFree is preferred for metadata; independent web/embed recovery fills missing entries.
+Neither route supplies audio. Verified matches are downloaded separately with yt-dlp,
+preferring YouTube Music. No Spotify developer credentials are required.
 """
 from __future__ import annotations
 
@@ -12,7 +11,8 @@ import re
 import time
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from collections import defaultdict, deque
+from dataclasses import dataclass, field, fields
 from urllib.error import HTTPError
 
 _ID_RE = re.compile(r"(track|album|playlist|artist)[/:]([A-Za-z0-9]+)")
@@ -76,9 +76,11 @@ class Resolved:
     kind: str
     name: str
     tracks: list["Track"]
-    # True when Spotify's embed cap (100) was hit and the API couldn't supply the rest,
-    # so `tracks` is the first 100 of an unknown larger total.
+    # True when a provider/page failed or an advertised collection count was not reached.
+    # Retain the recovered entries while making the incomplete collection visible.
     truncated: bool = False
+    provider: str = "Spotify web fallback"
+    total: int = 0
 
 
 def parse_spotify_url(text: str):
@@ -365,8 +367,8 @@ def _cover(images) -> str:
     return images[0]["url"] if images else ""
 
 
-def _track_from_api(t: dict, album_name: str = "", cover: str = "") -> Track | None:
-    if not t or not t.get("name"):
+def _track_from_api(t: dict, album_name: str = "", cover: str = "", date: str = "") -> Track | None:
+    if not isinstance(t, dict) or not t.get("name") or t.get("type") == "episode":
         return None
     names = [_clean(a["name"]) for a in t.get("artists", []) if a.get("name")]
     album = t.get("album") or {}
@@ -378,6 +380,7 @@ def _track_from_api(t: dict, album_name: str = "", cover: str = "") -> Track | N
         album=_clean(album.get("name") or album_name),
         track_number=t.get("track_number") or 0,
         cover_url=_cover(album.get("images")) or cover,
+        date=_clean(album.get("release_date") or date),
     )
 
 
@@ -422,7 +425,7 @@ def _api_album(sid: str, token: str, timeout: int):
     return name, tracks
 
 
-def resolve(text: str, timeout: int = 20) -> Resolved:
+def _resolve_web(text: str, timeout: int = 20) -> Resolved:
     parsed = parse_spotify_url(text)
     if not parsed:
         raise ValueError("Not a recognizable Spotify track/album/playlist URL")
@@ -471,4 +474,118 @@ def resolve(text: str, timeout: int = 20) -> Resolved:
 
     if not embed_tracks:
         raise ValueError("No tracks found for this Spotify link")
-    return Resolved(kind, name, embed_tracks)
+    return Resolved(kind, name, embed_tracks,
+                    truncated=kind == "playlist" and len(embed_tracks) >= 100)
+
+
+def _count(value) -> int:
+    try:
+        return max(0, int(value)) if isinstance(value, (int, str)) else 0
+    except ValueError:
+        return 0
+
+
+def _resolve_spotipy_free(kind: str, sid: str) -> Resolved:
+    # A client per resolution: SpotipyFree has mutable pagination/login state. Do not share
+    # one across concurrently resolved playlists or request an interactive Spotify login.
+    from SpotipyFree import Spotify
+
+    client = Spotify()
+    if kind == "track":
+        track = _track_from_api(client.track(sid))
+        if track is None or not track.artist:
+            raise ValueError("SpotipyFree returned no usable track metadata")
+        return Resolved(kind, track.title, [track], provider="SpotipyFree", total=1)
+
+    meta = client.playlist(sid) if kind == "playlist" else client.album(sid)
+    if not isinstance(meta, dict):
+        raise ValueError("SpotipyFree returned invalid collection metadata")
+    name = _clean(meta.get("name")) or kind
+    total = max(_count(_dig(meta, ["tracks", "total"])),
+                _count(_dig(meta, ["content", "totalCount"])), _count(meta.get("total_tracks")))
+    read_page = client.playlist_items if kind == "playlist" else client.album_tracks
+    tracks, offset = [], 0
+    previous_page = None
+    while True:
+        try:
+            # Current SpotipyFree returns all pages itself (next=False). Also accept the
+            # Spotipy page shape without assuming that an advertised total means it is full.
+            page = read_page(sid, limit=100, offset=offset)
+            if not isinstance(page, dict) or not isinstance(page.get("items"), list):
+                raise ValueError("SpotipyFree returned invalid track entries")
+            items = page["items"]
+            total = max(total, _count(page.get("total")))
+            signature = json.dumps(items, sort_keys=True, default=str)
+            if offset and signature == previous_page:
+                return Resolved(kind, name, tracks, True, "SpotipyFree", total)
+            previous_page = signature
+            for item in items:
+                raw = item.get("track") if kind == "playlist" and isinstance(item, dict) else item
+                track = _track_from_api(raw, name if kind == "album" else "",
+                                        _cover(meta.get("images")), _clean(meta.get("release_date")))
+                if track is not None and track.artist:
+                    tracks.append(track)
+            offset += len(items)
+            if not items or not page.get("next") or offset >= 10000:
+                break
+        except Exception:
+            if tracks:
+                return Resolved(kind, name, tracks, True, "SpotipyFree", total)
+            raise
+    if not tracks:
+        raise ValueError("SpotipyFree returned no usable tracks")
+    return Resolved(kind, name, tracks, len(tracks) < total or bool(page.get("next")),
+                    "SpotipyFree", total)
+
+
+def _merge_metadata(primary: Resolved, recovery: Resolved) -> Resolved:
+    """Keep the fuller list's order, preferred metadata, and duplicate occurrences.
+
+    A set union would silently remove intentional repeated songs. Match occurrences one at
+    a time, then append only entries the other provider did not include at all.
+    """
+    base, extra = (recovery, primary) if len(recovery.tracks) >= len(primary.tracks) else (primary, recovery)
+    by_name = defaultdict(deque)
+
+    def key(track):
+        return _clean(track.artist).casefold(), _clean(track.title).casefold()
+
+    for i, track in enumerate(extra.tracks):
+        by_name[key(track)].append((i, track))
+    combined, used = [], set()
+    for track in base.tracks:
+        matches = by_name[key(track)]
+        if matches:
+            i, other = matches.popleft()
+            used.add(i)
+            preferred, fallback = (other, track) if extra is primary else (track, other)
+            track = Track(**{f.name: getattr(preferred, f.name) or getattr(fallback, f.name) for f in fields(Track)})
+        combined.append(track)
+    combined.extend(t for i, t in enumerate(extra.tracks) if i not in used)
+    total = max(primary.total, recovery.total)
+    incomplete = len(combined) < total or (primary.truncated and recovery.truncated)
+    return Resolved(primary.kind, primary.name or recovery.name, combined, incomplete,
+                    "SpotipyFree + Spotify web recovery", total)
+
+
+def resolve(text: str, timeout: int = 20) -> Resolved:
+    parsed = parse_spotify_url(text)
+    if not parsed or parsed[0] not in ("track", "album", "playlist"):
+        raise ValueError("Not a recognizable Spotify track/album/playlist URL")
+    primary = None
+    try:
+        primary = _resolve_spotipy_free(*parsed)
+        if not primary.truncated:
+            return primary
+    except Exception:
+        # Import/provider failures must not strand a link that the independent web route
+        # can still read. A partial primary list is likewise worth trying to recover.
+        pass
+    try:
+        recovery = _resolve_web(text, timeout)
+    except Exception as exc:
+        if primary is not None:
+            return primary
+        raise ValueError("Could not read this Spotify link with SpotipyFree or the Spotify web fallback. "
+                         "Check that it is public and try again.") from exc
+    return _merge_metadata(primary, recovery) if primary is not None else recovery

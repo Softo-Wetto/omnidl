@@ -29,7 +29,7 @@ def candidates_from_ytmusic(items: list[dict]) -> list[Candidate]:
         if video_id and title and artist:
             candidates.append(Candidate(
                 source="youtube_music",
-                url=f"https://www.youtube.com/watch?v={video_id}",
+                url=f"https://music.youtube.com/watch?v={video_id}",
                 title=title,
                 artist=artist,
                 duration=int(item.get("duration_seconds") or 0),
