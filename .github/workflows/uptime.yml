@@ -1,25 +1,22 @@
 name: Uptime check
 
-# External dead-man's switch for the VPS. The server's own health check (vps-health.sh)
-# can't report that the server itself is down, so this runs on GitHub's machines instead.
-# A failed run makes GitHub email you (Settings > Notifications > Actions).
+# External check for the VPS. Manual only while GitHub refuses to start jobs.
+# Confirmed 13 Nov 2026: "The job was not started because your account is locked
+# due to a billing issue." The run had zero steps, so no endpoint was checked.
 #
-# Note: GitHub pauses scheduled workflows in a public repo after 60 days with no commits.
-# If the emails stop and the Actions tab shows this disabled, click "Enable workflow".
-# From 5 to 12 Nov 2026 the schedule was removed on purpose while a GitHub billing lock
-# stopped every job from starting; vps-health.sh reports it whenever this hasn't run for 8h.
+# Adding billing details did not clear the latest recorded failure. Repeated
+# scheduled runs only produce failure emails; retries and continue-on-error cannot
+# fix an account lock that happens before the runner starts.
 #
-# Never add this file in a commit whose message contains [skip ci]: the first version was,
-# and GitHub never registered the schedule (0 runs in 4 hours). deploy.yml ignores this
-# file, so a normal commit that only touches it does not redeploy OmniDL.
+# Recovery: request a billing-lock review at https://support.github.com/ if payment
+# information is already correct. After GitHub unlocks the account, run this manually
+# and confirm all six endpoints pass BEFORE restoring cron "7,37 * * * *".
+# "Enable workflow" alone does not restore a removed schedule.
+#
+# VPS-local health checks still run every 10 minutes, but cannot detect a whole-VPS
+# outage. VPS Control keeps that coverage gap visible. deploy.yml ignores this file.
 
 on:
-  schedule:
-    - cron: "7,37 * * * *"
-  # Editing this file runs it once straight away — proof the check itself works.
-  push:
-    branches: [main]
-    paths: [".github/workflows/uptime.yml"]
   workflow_dispatch: {}
 
 jobs:
@@ -41,3 +38,4 @@ jobs:
             [ "$code" = "200" ] || { echo "::error::$url returned HTTP $code"; fail=1; }
           done
           exit $fail
+
